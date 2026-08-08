@@ -9,7 +9,7 @@
     "start": "node --env-file=.env server.js"
   },
   "dependencies": {
-    "mediasoup": "3.14.10",
+    "mediasoup": "^3.19.3",
     "ws": "^8.18.0"
   }
 }
