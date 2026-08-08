@@ -16,7 +16,7 @@ import {
 const PORT = process.env.PORT || 4000;
 // Comma-separated list, e.g. "https://your-app.vercel.app,http://localhost:3000"
 const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*").split(",");
-
+ 
 // ---- office-monitor rooms (unchanged mesh mode) ----
 // roomId -> { broadcaster: ws|null, viewers: Map<viewerId, ws> }
 const monitorRooms = new Map();
