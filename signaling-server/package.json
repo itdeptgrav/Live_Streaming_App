@@ -1,15 +1,18 @@
 {
-  "name": "screen-monitor-signaling",
+  "name": "kumkum-signaling",
   "version": "0.1.0",
   "private": true,
   "type": "module",
   "main": "server.js",
   "scripts": {
-    "dev": "node --env-file=.env server.js",
-    "start": "node --env-file=.env server.js"
+    "dev": "node --env-file-if-exists=.env server.js",
+    "start": "node server.js"
   },
   "dependencies": {
     "mediasoup": "^3.19.3",
     "ws": "^8.18.0"
+  },
+  "engines": {
+    "node": ">=22"
   }
 }

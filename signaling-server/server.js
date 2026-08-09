@@ -11,7 +11,10 @@ import {
   roomIsFull,
   createWebRtcTransport,
   removePeer,
+  cancelReap,
+  roomCount,
 } from "./meetRooms.js";
+import { getAnnouncedAddress, getWorkerSettings } from "./mediasoupConfig.js";
 
 const PORT = process.env.PORT || 4000;
 // Comma-separated list, e.g. "https://your-app.vercel.app,http://localhost:3000"
@@ -76,6 +79,20 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
+  if (req.method === "GET" && (req.url === "/healthz" || req.url === "/")) {
+    res.writeHead(200, { "Content-Type": "application/json" });
+    res.end(
+      JSON.stringify({
+        ok: true,
+        announcedAddress: getAnnouncedAddress(),
+        rtcPorts: `${getWorkerSettings().rtcMinPort}-${getWorkerSettings().rtcMaxPort}`,
+        meetRooms: roomCount(),
+        uptimeSeconds: Math.round(process.uptime()),
+      })
+    );
+    return;
+  }
+
   res.writeHead(404);
   res.end();
 });
@@ -99,9 +116,14 @@ wss.on("connection", (ws) => {
       } else {
         handleMonitorMessage(ws, msg);
       }
-    } catch (err) {
+   } catch (err) {
       console.error(`[error] handling "${msg.type}":`, err);
-      send(ws, { type: "error", message: `Server error handling ${msg.type}: ${err.message}` });
+      send(ws, {
+        type: "error",
+        producerId: msg.producerId,
+        consumerId: msg.consumerId,
+        message: `Server error handling ${msg.type}: ${err.message}`,
+      });
     }
   });
 
@@ -212,11 +234,20 @@ function handleMonitorMessage(ws, msg) {
 async function handleMeetMessage(ws, msg) {
   switch (msg.type) {
     case "meet-join": {
-      const room = getMeetRoom(msg.roomId);
+      // Rooms live only in memory, so a server restart or a reap would turn
+      // every link you have already shared into a dead link. Recreate on demand
+      // for anything shaped like a room id — this is what makes an invite link
+      // durable.
+      let room = getMeetRoom(msg.roomId);
+      if (!room && /^[a-zA-Z0-9_-]{4,36}$/.test(msg.roomId || "")) {
+        room = createMeetRoomRecord(msg.roomId);
+        console.log(`[meet] recreated room ${msg.roomId} on join`);
+      }
       if (!room) {
-        send(ws, { type: "error", message: "Room does not exist" });
+        send(ws, { type: "error", message: "Invalid room id" });
         return;
       }
+      cancelReap(room);
       if (roomIsFull(room)) {
         send(ws, { type: "error", message: "Room is full" });
         return;
@@ -240,7 +271,12 @@ async function handleMeetMessage(ws, msg) {
       for (const [otherId, peer] of room.peers) {
         if (otherId === peerId) continue;
         for (const producer of peer.producers.values()) {
-          existingProducers.push({ producerId: producer.id, peerId: otherId, kind: producer.kind });
+          existingProducers.push({
+            producerId: producer.id,
+            peerId: otherId,
+            kind: producer.kind,
+            source: producer.appData?.source || (producer.kind === "audio" ? "mic" : "camera"),
+          });
         }
       }
 
@@ -287,22 +323,23 @@ async function handleMeetMessage(ws, msg) {
       const transport = peer.transports.get(msg.transportId);
       if (!transport) return;
 
-      const producer = await transport.produce({
+ const producer = await transport.produce({
         kind: msg.kind,
         rtpParameters: msg.rtpParameters,
-      });
-      peer.producers.set(producer.id, producer);
+        appData: { source: msg.source || (msg.kind === "audio" ? "mic" : "camera") },
+      });      peer.producers.set(producer.id, producer);
       console.log(`[meet] peer ${ws.meta.peerId} produced ${producer.kind} producer ${producer.id}`);
 
       send(ws, { type: "meet-produced", producerId: producer.id });
 
       for (const [otherId, otherPeer] of room.peers) {
         if (otherId === ws.meta.peerId) continue;
-        send(otherPeer.ws, {
+       send(otherPeer.ws, {
           type: "meet-new-producer",
           producerId: producer.id,
           peerId: ws.meta.peerId,
           kind: producer.kind,
+          source: producer.appData.source,
         });
       }
       break;
@@ -329,9 +366,12 @@ async function handleMeetMessage(ws, msg) {
       break;
     }
 
-    case "meet-consume": {
+  case "meet-consume": {
       const { room, peer } = currentMeetPeer(ws);
-      if (!room || !peer) return;
+      if (!room || !peer) {
+        send(ws, { type: "error", producerId: msg.producerId, message: "Not in a room" });
+        return;
+      }
 
       const canConsume = room.router.canConsume({
         producerId: msg.producerId,
@@ -362,12 +402,13 @@ async function handleMeetMessage(ws, msg) {
         `[meet] peer ${ws.meta.peerId} created ${consumer.kind} consumer ${consumer.id} for producer ${msg.producerId}`
       );
 
-      send(ws, {
+       send(ws, {
         type: "meet-consumed",
         consumerId: consumer.id,
         producerId: msg.producerId,
         kind: consumer.kind,
         rtpParameters: consumer.rtpParameters,
+        source: consumer.producerAppData?.source,
       });
       break;
     }
@@ -379,16 +420,30 @@ async function handleMeetMessage(ws, msg) {
       if (consumer) {
         await consumer.resume();
         console.log(`[meet] peer ${ws.meta.peerId} resumed consumer ${msg.consumerId}, paused=${consumer.paused}`);
-        if (consumer.kind === "video") {
-          // A consumer created paused (as ours are) may only start receiving
-          // delta frames once resumed, with no keyframe to decode from — VP8
-          // can't decode without one. Explicitly request a fresh keyframe from
-          // the producer so this viewer's decoder has somewhere to start.
-          await consumer.requestKeyFrame();
-          console.log(`[meet] peer ${ws.meta.peerId} requested keyframe for consumer ${msg.consumerId}`);
+         if (consumer.kind === "video") {
+          // A single PLI is not enough: at resume time the producer's
+          // RtpStreamRecv may not exist yet, in which case requestKeyFrame() is
+          // a silent no-op. Camera video hides this (motion forces frequent
+          // keyframes); a static screen share does not, and stays black
+          // forever. Stagger a few retries, and let the client ask again via
+          // meet-request-keyframe if its <video> is still 0x0.
+          for (const delay of [0, 400, 1200, 3000]) {
+            setTimeout(() => {
+              if (!consumer.closed) consumer.requestKeyFrame().catch(() => {});
+            }, delay);
+          }
         }
       } else {
         console.log(`[meet] peer ${ws.meta.peerId} resume: no consumer ${msg.consumerId}`);
+      }
+      break;
+    }
+
+     case "meet-request-keyframe": {
+      const { peer } = currentMeetPeer(ws);
+      const consumer = peer?.consumers.get(msg.consumerId);
+      if (consumer && consumer.kind === "video" && !consumer.closed) {
+        await consumer.requestKeyFrame();
       }
       break;
     }
@@ -415,6 +470,18 @@ function currentMeetPeer(ws) {
   return { room, peer };
 }
 
-httpServer.listen(PORT, () => {
-  console.log(`Realtime server (signaling + REST) listening on http://localhost:${PORT}`);
+httpServer.listen(PORT, "0.0.0.0", () => {
+  console.log("=".repeat(64));
+  console.log(`Realtime server listening on 0.0.0.0:${PORT}`);
+  console.log(`mediasoup announced address : ${getAnnouncedAddress()}`);
+  const { rtcMinPort, rtcMaxPort } = getWorkerSettings();
+  console.log(`mediasoup RTC port range    : ${rtcMinPort}-${rtcMaxPort} (UDP + TCP)`);
+  console.log(`allowed origins             : ${ALLOWED_ORIGINS.join(", ")}`);
+  console.log("Open BOTH the cloud firewall AND the host iptables for those ports.");
+  console.log("=".repeat(64));
+});
+
+process.on("SIGTERM", () => {
+  console.log("SIGTERM received, shutting down");
+  httpServer.close(() => process.exit(0));
 });

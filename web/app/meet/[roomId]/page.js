@@ -12,40 +12,63 @@ export default function MeetRoomPage({ params }) {
   const [displayName, setDisplayName] = useState("");
   const [status, setStatus] = useState("idle");
   const [error, setError] = useState(null);
-  const [remoteTiles, setRemoteTiles] = useState([]); // [{peerId, stream}]
+
+  // One tile per remote VIDEO producer (camera and screen are separate
+  // producers now, so a peer sharing their screen shows two tiles).
+  const [videoTiles, setVideoTiles] = useState([]); // [{producerId, peerId, source, stream, consumerId}]
+  const [audioTiles, setAudioTiles] = useState([]); // [{producerId, stream}]
+
   const [sharingScreen, setSharingScreen] = useState(false);
   const [micOn, setMicOn] = useState(true);
   const [cameraOn, setCameraOn] = useState(true);
+
   const localVideoRef = useRef(null);
+  const localScreenRef = useRef(null);
 
   const wsRef = useRef(null);
   const iceServersRef = useRef(null);
   const deviceRef = useRef(null);
   const sendTransportRef = useRef(null);
   const recvTransportRef = useRef(null);
-  const localStreamRef = useRef(null);
-  const audioProducerRef = useRef(null);
-  const videoProducerRef = useRef(null);
-  const cameraTrackRef = useRef(null);
-  const screenTrackRef = useRef(null);
- const remoteStreamsRef = useRef(new Map()); // peerId -> MediaStream
-  const consumersByProducerRef = useRef(new Map()); // producerId -> {peerId, track, kind}
-  const consumeQueueRef = useRef(Promise.resolve()); // serializes consumeProducer calls
+
+  const localStreamRef = useRef(null); // camera + mic
+  const screenStreamRef = useRef(null); // screen only
+
+  const micProducerRef = useRef(null);
+  const cameraProducerRef = useRef(null);
+  const screenProducerRef = useRef(null);
+
+  // producerId -> {peerId, source, stream, consumerId, consumer}
+  const remoteVideosRef = useRef(new Map());
+  const remoteAudiosRef = useRef(new Map());
+
+  const consumeQueueRef = useRef(Promise.resolve());
   const pendingRef = useRef({
     transportCreate: new Map(), // direction -> {resolve}
     transportConnect: new Map(), // transportId -> {resolve}
-    consume: new Map(), // producerId -> {resolve}
-    produce: null, // {resolve}
+    consume: new Map(), // producerId -> {resolve, reject}
+    produce: [], // FIFO of {resolve} — one entry per in-flight produce()
   });
 
-  // The local <video> element only exists once `joined` is true, so re-attach
-  // the stream here rather than relying on the one-off assignment in join()
-  // (that runs while the pre-join screen — with no video element — is still showing).
+  // Stable identity so the <RemoteVideo> keyframe-nudge effect isn't torn down
+  // and rebuilt on every parent render.
+  const requestKeyFrame = useRef((consumerId) => {
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: "meet-request-keyframe", consumerId }));
+    }
+  }).current;
+
   useEffect(() => {
     if (joined && localVideoRef.current && localStreamRef.current) {
       localVideoRef.current.srcObject = localStreamRef.current;
     }
   }, [joined]);
+
+  useEffect(() => {
+    if (sharingScreen && localScreenRef.current && screenStreamRef.current) {
+      localScreenRef.current.srcObject = screenStreamRef.current;
+    }
+  }, [sharingScreen]);
 
   function send(msg) {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -53,87 +76,95 @@ export default function MeetRoomPage({ params }) {
     }
   }
 
-  // One persistent MediaStream per peer, mutated in place as tracks arrive.
-  // A MediaStream is a live object — a video element already showing it picks
-  // up added tracks automatically. Replacing srcObject with a brand-new
-  // MediaStream on every track (an earlier, wrong fix) forces the element to
-  // reload, aborting any in-flight play() — that was the actual cause of the
-  // black tiles, confirmed via console: "AbortError: play() request was
-  // interrupted by a new load request."
-  function addRemoteTrack(peerId, track) {
-    let stream = remoteStreamsRef.current.get(peerId);
-    if (!stream) {
-      stream = new MediaStream();
-      remoteStreamsRef.current.set(peerId, stream);
-    }
-    stream.addTrack(track);
-    setRemoteTiles(
-      Array.from(remoteStreamsRef.current.entries()).map(([id, s]) => ({
-        peerId: id,
-        stream: s,
-        videoTrackId: s.getVideoTracks()[0]?.id ?? null,
+  function syncTiles() {
+    setVideoTiles(
+      Array.from(remoteVideosRef.current.entries()).map(([producerId, v]) => ({
+        producerId,
+        peerId: v.peerId,
+        source: v.source,
+        stream: v.stream,
+        consumerId: v.consumerId,
+      }))
+    );
+    setAudioTiles(
+      Array.from(remoteAudiosRef.current.entries()).map(([producerId, a]) => ({
+        producerId,
+        stream: a.stream,
       }))
     );
   }
 
-  function removeRemoteTile(peerId) {
-    remoteStreamsRef.current.delete(peerId);
-    setRemoteTiles(
-      Array.from(remoteStreamsRef.current.entries()).map(([id, s]) => ({
-        peerId: id,
-        stream: s,
-        videoTrackId: s.getVideoTracks()[0]?.id ?? null,
-      }))
-    );
+  // Each remote video track gets its OWN MediaStream that is never mutated.
+  // Tracks are never added to or removed from a live stream, so the <video>
+  // element never has to reload — which is what produced the 0x0 / black tile
+  // and the "play() interrupted by a new load request" aborts.
+  function addRemoteConsumer({ producerId, peerId, source, consumer }) {
+    const stream = new MediaStream([consumer.track]);
+    const entry = { peerId, source, stream, consumerId: consumer.id, consumer };
+    if (consumer.kind === "video") remoteVideosRef.current.set(producerId, entry);
+    else remoteAudiosRef.current.set(producerId, entry);
+    syncTiles();
   }
 
-  // Removes one specific track (e.g. a peer's old camera track after they
-  // switch to screen share) from their persistent MediaStream, leaving any
-  // other tracks (audio, or the incoming new video track) untouched.
-  function removeRemoteProducerTrack(producerId) {
-    const info = consumersByProducerRef.current.get(producerId);
-    if (!info) return;
-    consumersByProducerRef.current.delete(producerId);
-
-    const stream = remoteStreamsRef.current.get(info.peerId);
-    if (stream) {
-      stream.removeTrack(info.track);
-      setRemoteTiles(
-        Array.from(remoteStreamsRef.current.entries()).map(([id, s]) => ({
-          peerId: id,
-          stream: s,
-          videoTrackId: s.getVideoTracks()[0]?.id ?? null,
-        }))
-      );
+  function removeRemoteProducer(producerId) {
+    for (const map of [remoteVideosRef.current, remoteAudiosRef.current]) {
+      const entry = map.get(producerId);
+      if (!entry) continue;
+      try {
+        entry.consumer.close(); // was never closed before → leaked transceivers
+      } catch { }
+      map.delete(producerId);
     }
+    syncTiles();
   }
 
-  // Queued so overlapping calls (e.g. a peer's audio and video producers
-  // arriving close together) never race on reading+writing remoteStreamsRef —
-  // each call's full read-modify-write of the peer's MediaStream completes
-  // before the next one starts.
-  function consumeProducer(producerId, peerId) {
-    const run = () => doConsumeProducer(producerId, peerId);
+  function removePeerTiles(peerId) {
+    for (const map of [remoteVideosRef.current, remoteAudiosRef.current]) {
+      for (const [producerId, entry] of map) {
+        if (entry.peerId !== peerId) continue;
+        try {
+          entry.consumer.close();
+        } catch { }
+        map.delete(producerId);
+      }
+    }
+    syncTiles();
+  }
+
+  function consumeProducer(producerId, peerId, source) {
+    const run = () => doConsumeProducer(producerId, peerId, source);
     consumeQueueRef.current = consumeQueueRef.current.then(run, run);
     return consumeQueueRef.current;
   }
 
-  async function doConsumeProducer(producerId, peerId) {
+  async function doConsumeProducer(producerId, peerId, source) {
+    if (!recvTransportRef.current || !deviceRef.current) return;
+
     const { consume } = pendingRef.current;
     const promise = new Promise((resolve, reject) => consume.set(producerId, { resolve, reject }));
+
+    // Hard timeout: without it, one unanswered consume response wedges the
+    // serialized queue forever and NOTHING new ever renders again — including
+    // a screen share started later in the call.
+    const timeout = setTimeout(() => {
+      consume.get(producerId)?.reject(new Error("consume timed out"));
+    }, 10000);
+
     send({
       type: "meet-consume",
       transportId: recvTransportRef.current.id,
       producerId,
       rtpCapabilities: deviceRef.current.rtpCapabilities,
     });
-    let consumerId, kind, rtpParameters;
+
+    let consumerId, kind, rtpParameters, serverSource;
     try {
-      ({ consumerId, kind, rtpParameters } = await promise);
+      ({ consumerId, kind, rtpParameters, source: serverSource } = await promise);
     } catch (err) {
-      console.error(`Failed to consume producer ${producerId} (peer ${peerId}):`, err.message);
+      console.error(`[consume] producer ${producerId} (peer ${peerId}) failed:`, err.message);
       return;
     } finally {
+      clearTimeout(timeout);
       consume.delete(producerId);
     }
 
@@ -145,44 +176,41 @@ export default function MeetRoomPage({ params }) {
     });
     send({ type: "meet-resume-consumer", consumerId });
 
-    consumersByProducerRef.current.set(producerId, { peerId, track: consumer.track, kind });
-    addRemoteTrack(peerId, consumer.track);
-
-    if (kind === "video") {
-      // Real WebRTC stats — tells us definitively whether video RTP packets
-      // are even arriving over the network, vs. arriving but failing to decode.
-      setTimeout(async () => {
-        const stats = await consumer.getStats();
-        stats.forEach((report) => {
-          if (report.type === "inbound-rtp") {
-            console.log(`[stats:${peerId}] video inbound-rtp:`, {
-              packetsReceived: report.packetsReceived,
-              bytesReceived: report.bytesReceived,
-              framesReceived: report.framesReceived,
-              framesDecoded: report.framesDecoded,
-              packetsLost: report.packetsLost,
-              codec: report.codecId,
-            });
-          }
-        });
-      }, 3000);
-    }
+    addRemoteConsumer({
+      producerId,
+      peerId,
+      source: source || serverSource || (kind === "audio" ? "mic" : "camera"),
+      consumer,
+    });
   }
 
   async function join() {
     setStatus("connecting");
     setError(null);
 
-    let localStream;
+    // Camera and mic are requested separately so a dead/busy webcam no longer
+    // blocks the whole join (the old single getUserMedia call failed both).
+    let audioTrack = null;
+    let videoTrack = null;
     try {
-      localStream = await navigator.mediaDevices.getUserMedia({ video: true, audio: true });
-    } catch {
-      setError("Camera/microphone permission denied");
+      const a = await navigator.mediaDevices.getUserMedia({ audio: true });
+      audioTrack = a.getAudioTracks()[0] || null;
+    } catch { }
+    try {
+      const v = await navigator.mediaDevices.getUserMedia({ video: true });
+      videoTrack = v.getVideoTracks()[0] || null;
+    } catch { }
+
+    if (!audioTrack && !videoTrack) {
+      setError("Camera/microphone permission denied — allow access in the address-bar icon, then retry");
       setStatus("idle");
       return;
     }
+    if (!videoTrack) setCameraOn(false);
+    if (!audioTrack) setMicOn(false);
+
+    const localStream = new MediaStream([audioTrack, videoTrack].filter(Boolean));
     localStreamRef.current = localStream;
-    cameraTrackRef.current = localStream.getVideoTracks()[0] || null;
 
     iceServersRef.current = await getIceServers();
 
@@ -194,6 +222,12 @@ export default function MeetRoomPage({ params }) {
     };
 
     ws.onerror = () => setError("Could not reach the realtime server");
+
+    ws.onclose = () => {
+      // Never leave the consume queue hanging on a dropped socket.
+      for (const [, p] of pendingRef.current.consume) p.reject(new Error("socket closed"));
+      pendingRef.current.consume.clear();
+    };
 
     ws.onmessage = async (event) => {
       const msg = JSON.parse(event.data);
@@ -209,14 +243,23 @@ export default function MeetRoomPage({ params }) {
             await createSendTransport();
             await createRecvTransport();
 
-            for (const track of localStream.getTracks()) {
-              const producer = await sendTransportRef.current.produce({ track });
-              if (track.kind === "video") videoProducerRef.current = producer;
-              if (track.kind === "audio") audioProducerRef.current = producer;
+            if (audioTrack) {
+              micProducerRef.current = await sendTransportRef.current.produce({
+                track: audioTrack,
+                stopTracks: false,
+                appData: { source: "mic" },
+              });
+            }
+            if (videoTrack) {
+              cameraProducerRef.current = await sendTransportRef.current.produce({
+                track: videoTrack,
+                stopTracks: false,
+                appData: { source: "camera" },
+              });
             }
 
             for (const p of msg.existingProducers) {
-              await consumeProducer(p.producerId, p.peerId);
+              consumeProducer(p.producerId, p.peerId, p.source);
             }
 
             setJoined(true);
@@ -239,7 +282,7 @@ export default function MeetRoomPage({ params }) {
         }
 
         case "meet-produced": {
-          pending.produce?.resolve(msg.producerId);
+          pending.produce.shift()?.resolve(msg.producerId);
           break;
         }
 
@@ -249,24 +292,24 @@ export default function MeetRoomPage({ params }) {
         }
 
         case "meet-new-producer": {
-          await consumeProducer(msg.producerId, msg.peerId);
+          consumeProducer(msg.producerId, msg.peerId, msg.source);
           break;
         }
 
         case "meet-producer-closed": {
-          removeRemoteProducerTrack(msg.producerId);
+          removeRemoteProducer(msg.producerId);
           break;
         }
 
         case "meet-peer-left": {
-          removeRemoteTile(msg.peerId);
+          removePeerTiles(msg.peerId);
           break;
         }
 
         case "error": {
           console.error("Server error:", msg.message);
-          if (msg.producerId) {
-            pending.consume.get(msg.producerId)?.reject(new Error(msg.message));
+          if (msg.producerId && pending.consume.has(msg.producerId)) {
+            pending.consume.get(msg.producerId).reject(new Error(msg.message));
           } else {
             setError(msg.message);
           }
@@ -299,12 +342,18 @@ export default function MeetRoomPage({ params }) {
       send({ type: "meet-connect-transport", transportId: transport.id, dtlsParameters });
       connectedPromise.then(callback);
     });
-    transport.on("produce", ({ kind, rtpParameters }, callback) => {
-      const producedPromise = new Promise((resolve) => {
-        pendingRef.current.produce = { resolve };
+    // appData.source travels to the server so other peers can tell a screen
+    // producer apart from a camera producer and lay the tiles out correctly.
+    transport.on("produce", ({ kind, rtpParameters, appData }, callback, errback) => {
+      const producedPromise = new Promise((resolve) => produce.push({ resolve }));
+      send({
+        type: "meet-produce",
+        transportId: transport.id,
+        kind,
+        rtpParameters,
+        source: appData?.source,
       });
-      send({ type: "meet-produce", transportId: transport.id, kind, rtpParameters });
-      producedPromise.then((id) => callback({ id }));
+      producedPromise.then((id) => callback({ id })).catch(errback);
     });
 
     sendTransportRef.current = transport;
@@ -334,83 +383,67 @@ export default function MeetRoomPage({ params }) {
     recvTransportRef.current = transport;
   }
 
+  // Screen share is now a SECOND, independent video producer. The camera
+  // producer is left completely alone — no close, no re-produce, no
+  // renegotiation on the receiving side, so nothing can race.
   async function startScreenShare() {
+    if (screenProducerRef.current) return;
     let screenStream;
     try {
-      screenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      screenStream = await navigator.mediaDevices.getDisplayMedia({
+        video: { frameRate: { ideal: 15, max: 30 } },
+      });
     } catch {
       return; // user cancelled the picker
     }
     const screenTrack = screenStream.getVideoTracks()[0];
-    screenTrackRef.current = screenTrack;
+    if (!screenTrack) return;
 
-    // Close the camera's video producer instead of swapping its track:
-    // replaceTrack() keeps the producer's original rtpParameters (negotiated
-    // for the camera's resolution/framerate), which mismatches the screen
-    // track's dimensions and shows as a blank/0x0 frame on the receiver.
-    // A fresh produce() call negotiates correct rtpParameters for the screen
-    // track from scratch.
-    const oldProducerId = videoProducerRef.current?.id;
-    if (oldProducerId) {
-      send({ type: "meet-close-producer", producerId: oldProducerId });
-      videoProducerRef.current.close();
+    // Tells the encoder this is text/UI, not motion video: keeps text legible
+    // and stops Chrome from aggressively downscaling a static screen.
+    if ("contentHint" in screenTrack) screenTrack.contentHint = "detail";
+
+    screenStreamRef.current = screenStream;
+
+    try {
+      screenProducerRef.current = await sendTransportRef.current.produce({
+        track: screenTrack,
+        encodings: [{ maxBitrate: 3_000_000 }],
+        codecOptions: { videoGoogleStartBitrate: 1000 },
+        appData: { source: "screen" },
+      });
+    } catch (err) {
+      setError(`Could not start screen share: ${err.message}`);
+      screenStream.getTracks().forEach((t) => t.stop());
+      screenStreamRef.current = null;
+      return;
     }
-
-    // Explicit encodings: getDisplayMedia() tracks can report incomplete or
-    // not-yet-settled dimensions via getSettings() at the instant produce()
-    // is called, causing mediasoup-client's default encoding inference to
-    // negotiate a degenerate (0-bitrate/0-dimension) encoding — which is
-    // exactly the "0x0 forever" symptom on the receiving side. Passing
-    // encodings explicitly bypasses that inference entirely.
-    const newProducer = await sendTransportRef.current.produce({
-      track: screenTrack,
-      encodings: [{ maxBitrate: 3_000_000 }],
-      codecOptions: { videoGoogleStartBitrate: 1000 },
-    });
-    videoProducerRef.current = newProducer;
-
-    // Show the screen in your own preview too, keeping your mic audio track.
-    const previewStream = new MediaStream([
-      screenTrack,
-      ...localStreamRef.current.getAudioTracks(),
-    ]);
-    if (localVideoRef.current) localVideoRef.current.srcObject = previewStream;
 
     setSharingScreen(true);
-    screenTrack.onended = stopScreenShare; // user clicked the browser's native "Stop sharing"
+    screenTrack.onended = stopScreenShare; // browser's native "Stop sharing" bar
   }
 
-  async function stopScreenShare() {
-    screenTrackRef.current?.stop();
-    screenTrackRef.current = null;
-
-    const oldProducerId = videoProducerRef.current?.id;
-    if (oldProducerId) {
-      send({ type: "meet-close-producer", producerId: oldProducerId });
-      videoProducerRef.current.close();
+  function stopScreenShare() {
+    const producer = screenProducerRef.current;
+    if (producer) {
+      send({ type: "meet-close-producer", producerId: producer.id });
+      producer.close(); // stopTracks defaults true → also stops the screen track
+      screenProducerRef.current = null;
     }
-
-    if (cameraTrackRef.current && sendTransportRef.current) {
-      const newProducer = await sendTransportRef.current.produce({ track: cameraTrackRef.current });
-      videoProducerRef.current = newProducer;
-    }
-    if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
-
+    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+    screenStreamRef.current = null;
     setSharingScreen(false);
   }
 
   function toggleMic() {
-    const track = localStreamRef.current?.getAudioTracks()[0];
+    const track = micProducerRef.current?.track;
     if (!track) return;
     track.enabled = !track.enabled;
     setMicOn(track.enabled);
   }
 
   function toggleCamera() {
-    // Targets whichever track the video producer currently carries (camera or
-    // screen) — disabling it locally is enough; the encoder just stops
-    // sending meaningful frames, no renegotiation needed.
-    const track = videoProducerRef.current?.track;
+    const track = cameraProducerRef.current?.track;
     if (!track) return;
     track.enabled = !track.enabled;
     setCameraOn(track.enabled);
@@ -419,29 +452,57 @@ export default function MeetRoomPage({ params }) {
   function leave() {
     send({ type: "meet-leave" });
     wsRef.current?.close();
-    screenTrackRef.current?.stop();
+    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
     localStreamRef.current?.getTracks().forEach((t) => t.stop());
     sendTransportRef.current?.close();
     recvTransportRef.current?.close();
+    screenProducerRef.current = null;
+    cameraProducerRef.current = null;
+    micProducerRef.current = null;
+    remoteVideosRef.current.clear();
+    remoteAudiosRef.current.clear();
+    setVideoTiles([]);
+    setAudioTiles([]);
     setJoined(false);
     setStatus("idle");
     setSharingScreen(false);
     setMicOn(true);
     setCameraOn(true);
-    setRemoteTiles([]);
-    remoteStreamsRef.current.clear();
   }
 
   useEffect(() => leave, []);
 
   const [shareLink, setShareLink] = useState("");
+  const [copied, setCopied] = useState(false);
   useEffect(() => setShareLink(window.location.href), []);
+
+  async function copyLink() {
+    try {
+      await navigator.clipboard.writeText(shareLink || window.location.href);
+    } catch {
+      // Clipboard API needs a secure context; fall back to a manual selection.
+      const el = document.createElement("textarea");
+      el.value = shareLink || window.location.href;
+      document.body.appendChild(el);
+      el.select();
+      document.execCommand("copy");
+      el.remove();
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
+  }
 
   if (!joined) {
     return (
       <main className="flex-1 max-w-md mx-auto w-full p-8 flex flex-col gap-4">
         <h1 className="text-2xl font-semibold">Join meeting</h1>
-        <p className="text-sm text-zinc-500 break-all">Link: {shareLink}</p>
+        <p className="text-sm text-zinc-500 break-all">{shareLink}</p>
+        <button
+          onClick={copyLink}
+          className="self-start text-xs border border-zinc-300 dark:border-zinc-700 rounded px-2 py-1"
+        >
+          {copied ? "Link copied" : "Copy invite link"}
+        </button>
         {error && <p className="text-red-600 text-sm">{error}</p>}
         <input
           value={displayName}
@@ -466,33 +527,31 @@ export default function MeetRoomPage({ params }) {
         <h1 className="text-xl font-semibold">Room {roomId}</h1>
         <div className="flex gap-2">
           <button
+            onClick={copyLink}
+            className="rounded px-4 py-2 border border-zinc-300 dark:border-zinc-700"
+          >
+            {copied ? "Copied" : "Copy link"}
+          </button>
+          <button
             onClick={toggleMic}
-            className={`rounded px-4 py-2 ${
-              micOn
-                ? "bg-black text-white dark:bg-white dark:text-black"
-                : "bg-red-600 text-white"
-            }`}
+            className={`rounded px-4 py-2 ${micOn ? "bg-black text-white dark:bg-white dark:text-black" : "bg-red-600 text-white"
+              }`}
           >
             {micOn ? "Mute" : "Unmute"}
           </button>
           <button
             onClick={toggleCamera}
-            disabled={sharingScreen}
-            className={`rounded px-4 py-2 disabled:opacity-40 ${
-              cameraOn
-                ? "bg-black text-white dark:bg-white dark:text-black"
-                : "bg-red-600 text-white"
-            }`}
+            className={`rounded px-4 py-2 ${cameraOn ? "bg-black text-white dark:bg-white dark:text-black" : "bg-red-600 text-white"
+              }`}
           >
             {cameraOn ? "Hide camera" : "Show camera"}
           </button>
           <button
             onClick={sharingScreen ? stopScreenShare : startScreenShare}
-            className={`rounded px-4 py-2 ${
-              sharingScreen
-                ? "bg-zinc-700 text-white"
-                : "bg-black text-white dark:bg-white dark:text-black"
-            }`}
+            className={`rounded px-4 py-2 ${sharingScreen
+              ? "bg-zinc-700 text-white"
+              : "bg-black text-white dark:bg-white dark:text-black"
+              }`}
           >
             {sharingScreen ? "Stop sharing" : "Share screen"}
           </button>
@@ -501,6 +560,8 @@ export default function MeetRoomPage({ params }) {
           </button>
         </div>
       </div>
+
+      {error && <p className="text-red-600 text-sm">{error}</p>}
 
       <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-4 gap-4">
         <div className="relative">
@@ -511,7 +572,10 @@ export default function MeetRoomPage({ params }) {
             playsInline
             className="w-full rounded-lg border border-zinc-200 dark:border-zinc-800 bg-black aspect-video"
           />
-          {!cameraOn && !sharingScreen && (
+          <span className="absolute top-1 left-1 text-[10px] text-white bg-black/60 px-1.5 py-0.5 rounded">
+            You
+          </span>
+          {!cameraOn && (
             <div className="absolute inset-0 flex items-center justify-center bg-black/80 text-white text-sm rounded-lg">
               Camera off
             </div>
@@ -522,62 +586,127 @@ export default function MeetRoomPage({ params }) {
             </span>
           )}
         </div>
-        {remoteTiles.map((tile) => (
+
+        {sharingScreen && (
+          <div className="relative">
+            <video
+              ref={localScreenRef}
+              autoPlay
+              muted
+              playsInline
+              className="w-full rounded-lg border border-lime-500 bg-black aspect-video"
+            />
+            <span className="absolute top-1 left-1 text-[10px] text-white bg-lime-600 px-1.5 py-0.5 rounded">
+              Your screen
+            </span>
+          </div>
+        )}
+
+        {videoTiles.map((tile) => (
           <RemoteVideo
-            key={`${tile.peerId}:${tile.videoTrackId}`}
+            key={tile.producerId}
             stream={tile.stream}
+            consumerId={tile.consumerId}
             peerId={tile.peerId}
+            source={tile.source}
+            requestKeyFrame={requestKeyFrame}
           />
         ))}
       </div>
+
+      {audioTiles.map((tile) => (
+        <RemoteAudio key={tile.producerId} stream={tile.stream} />
+      ))}
     </main>
   );
 }
 
-function RemoteVideo({ stream, peerId }) {
+function RemoteAudio({ stream }) {
+  const ref = useRef(null);
+  useEffect(() => {
+    if (!ref.current) return;
+    ref.current.srcObject = stream;
+    ref.current.play().catch(() => { });
+  }, [stream]);
+  return <audio ref={ref} autoPlay playsInline className="hidden" />;
+}
+
+function RemoteVideo({ stream, consumerId, peerId, source, requestKeyFrame }) {
   const ref = useRef(null);
   const [blocked, setBlocked] = useState(false);
   const [debug, setDebug] = useState("");
 
   useEffect(() => {
-    const label = `[remote:${peerId}]`;
-    // Fires for tracks added to this same stream *after* this effect already
-    // ran (e.g. video arriving after audio) — no need to touch srcObject or
-    // play() again for those, the live stream just keeps working.
-    stream.onaddtrack = (e) =>
-      console.log(`${label} track added post-mount: ${e.track.kind}`);
-
-    if (!ref.current) return;
     const video = ref.current;
-    if (video.srcObject !== stream) {
-      video.srcObject = stream;
-    }
+    if (!video) return;
+    const label = `[remote:${peerId}:${source}]`;
 
-    video.onloadedmetadata = () =>
-      console.log(`${label} loadedmetadata — videoWidth=${video.videoWidth} videoHeight=${video.videoHeight}`);
-    video.onplaying = () => {
-      console.log(`${label} playing — videoWidth=${video.videoWidth} videoHeight=${video.videoHeight}`);
-      setDebug(`playing ${video.videoWidth}x${video.videoHeight}`);
+    // Remote audio is rendered by separate <RemoteAudio> elements, so these
+    // video elements are always video-only and can safely be muted. Without
+    // muted, Chrome's autoplay policy rejects play() with NotAllowedError
+    // even though there is no audio track — that was the "Click to play"
+    // overlay. Set it as a property too; the JSX attribute alone is unreliable
+    // across hydration.
+    video.muted = true;
+    video.srcObject = stream;
+    video.onresize = () => setDebug(`${video.videoWidth}x${video.videoHeight}`);
+    video.onerror = () => console.log(`${label} element error:`, video.error);
+
+    video.play().catch((err) => {
+      console.log(`${label} play() rejected:`, err.name, err.message);
+      setBlocked(true);
+    });
+
+    // A consumer created paused only starts getting delta frames on resume.
+    // A static screen share can go minutes without emitting a keyframe on its
+    // own, so if nothing has decoded yet we nudge the SFU to pull a fresh one
+    // from the producer. This is the fix for the permanently-black 0x0 tile.
+    // Chrome leaves play() PENDING forever (neither resolve nor reject) when a
+    // MediaStream has no decodable frames, so the promise is useless as a
+    // readiness signal. Poll videoWidth instead — that is the only thing that
+    // proves frames actually decoded.
+    let tries = 0;
+    const timer = setInterval(() => {
+      const v = ref.current;
+      if (!v) return;
+
+      if (v.videoWidth > 0) {
+        setDebug(`${v.videoWidth}x${v.videoHeight}`);
+        setBlocked(false);
+        clearInterval(timer);
+        return;
+      }
+
+      if (++tries > 10) {
+        console.log(`${label} gave up — still 0x0 after ${tries} tries`);
+        clearInterval(timer);
+        return;
+      }
+
+      console.log(
+        `${label} still 0x0 (try ${tries}) — readyState=${v.readyState} paused=${v.paused} ` +
+        `tracks=${stream.getVideoTracks().map((t) => `${t.readyState}/muted:${t.muted}`).join(",")}`
+      );
+      requestKeyFrame(consumerId);
+      v.play().catch(() => { });
+    }, 1500);
+
+
+    return () => {
+      clearInterval(timer);
+      video.onplaying = null;
+      video.onresize = null;
+      video.onerror = null;
     };
-    video.onerror = () => console.log(`${label} video element error:`, video.error);
-
-    video.play()
-      .then(() => console.log(`${label} play() resolved`))
-      .catch((err) => {
-        console.log(`${label} play() REJECTED:`, err.name, err.message);
-        setBlocked(true);
-      });
-  }, [stream, peerId]);
+  }, [stream, consumerId, peerId, source, requestKeyFrame]);
 
   function forcePlay() {
     ref.current
       ?.play()
       .then(() => setBlocked(false))
-      .catch((err) => console.log(`[remote:${peerId}] forcePlay REJECTED:`, err.name, err.message));
+      .catch(() => { });
   }
 
-  // Any click anywhere on the page is a valid user gesture — don't make the
-  // user hunt for this exact tile's overlay when a click elsewhere works too.
   useEffect(() => {
     if (!blocked) return;
     window.addEventListener("click", forcePlay, { once: true });
@@ -590,8 +719,13 @@ function RemoteVideo({ stream, peerId }) {
         ref={ref}
         autoPlay
         playsInline
-        className="w-full rounded-lg border border-zinc-200 dark:border-zinc-800 bg-black aspect-video"
+        muted
+        className={`w-full rounded-lg border bg-black aspect-video ${source === "screen" ? "border-lime-500" : "border-zinc-200 dark:border-zinc-800"
+          }`}
       />
+      <span className="absolute top-1 left-1 text-[10px] text-white bg-black/60 px-1.5 py-0.5 rounded">
+        {source === "screen" ? "Screen" : "Camera"}
+      </span>
       <p className="absolute bottom-1 left-1 text-[10px] text-lime-400 bg-black/60 px-1 rounded">
         {debug || "no frame yet"}
       </p>

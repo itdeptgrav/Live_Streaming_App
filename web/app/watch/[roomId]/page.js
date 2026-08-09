@@ -2,8 +2,7 @@
 
 import { use, useEffect, useRef, useState } from "react";
 import { getIceServers } from "@/lib/webrtcConfig";
-
-const SIGNALING_URL = process.env.NEXT_PUBLIC_SIGNALING_URL;
+import { SIGNALING_URL } from "@/lib/realtime";
 
 export default function WatchPage({ params }) {
   const { roomId } = use(params);

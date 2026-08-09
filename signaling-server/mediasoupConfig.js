@@ -1,20 +1,27 @@
-import path from "path";
-import { fileURLToPath } from "url";
+// Read LAZILY, never snapshotted at module-evaluation time. mediasoupBootstrap
+// sets MEDIASOUP_ANNOUNCED_IP from an async public-IP lookup, and ES module
+// siblings evaluate before that top-level await resolves — a const here would
+// capture the fallback and silently announce 127.0.0.1 in production.
+//
+// The value MUST be routable: announcing 0.0.0.0 makes Chrome discard every
+// ICE candidate, ICE parks at "new", and no media ever flows despite clean
+// signalling logs. mediasoup accepts an IPv4, IPv6 or hostname here.
+export function getAnnouncedAddress() {
+  return process.env.MEDIASOUP_ANNOUNCED_IP || "127.0.0.1";
+}
 
-const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
-// Tune ANNOUNCED_IP for production: it must be the realtime server's public IP
-// (or public hostname resolved to IP) so remote participants' ICE negotiation
-// can reach it. Leave unset for local dev (mediasoup falls back to listenIp).
-const ANNOUNCED_IP = process.env.MEDIASOUP_ANNOUNCED_IP || undefined;
-
-
-
-export const workerSettings = {
-  rtcMinPort: 40000,
-  rtcMaxPort: 49999,
-  logLevel: "warn",
-};
+// One UDP port per WebRTC transport, two transports per participant. The
+// default 100-port window covers ~50 concurrent participants and keeps the
+// cloud firewall rule small. These EXACT ports must be open in BOTH the cloud
+// firewall (e.g. an OCI Security List) and the instance's own iptables.
+export function getWorkerSettings() {
+  return {
+    rtcMinPort: Number(process.env.MEDIASOUP_MIN_PORT || 40000),
+    rtcMaxPort: Number(process.env.MEDIASOUP_MAX_PORT || 40100),
+    logLevel: process.env.MEDIASOUP_LOG_LEVEL || "warn",
+  };
+}
 
 export const routerMediaCodecs = [
   {
@@ -37,14 +44,18 @@ export const routerMediaCodecs = [
   },
 ];
 
-export const webRtcTransportOptions = {
-  listenIps: [{ ip: "0.0.0.0", announcedIp: ANNOUNCED_IP }],
-  enableUdp: true,
-  enableTcp: true,
-  preferUdp: true,
-  initialAvailableOutgoingBitrate: 800000,
-};
+export function getWebRtcTransportOptions() {
+  const announcedAddress = getAnnouncedAddress();
+  return {
+    listenInfos: [
+      { protocol: "udp", ip: "0.0.0.0", announcedAddress },
+      { protocol: "tcp", ip: "0.0.0.0", announcedAddress },
+    ],
+    initialAvailableOutgoingBitrate: 800000,
+  };
+}
 
 // Practical ceiling for a mesh-free SFU room before you'd want to consider
-// simulcast/selective forwarding tuning. Not a hard technical limit.
-export const MAX_MEET_PARTICIPANTS = 30;
+// simulcast/selective forwarding tuning. Not a hard technical limit — but on a
+// 2-core box expect frames to start dropping somewhere past 10-15 cameras.
+export const MAX_MEET_PARTICIPANTS = Number(process.env.MAX_MEET_PARTICIPANTS || 30);

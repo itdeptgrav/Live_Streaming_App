@@ -1,0 +1,11 @@
+# Install to /etc/caddy/Caddyfile, then: sudo systemctl reload caddy
+#
+# Caddy fetches and renews a Let's Encrypt certificate automatically. It only
+# wraps the SIGNALLING WebSocket on port 443. The media plane (DTLS-SRTP on
+# UDP 40000-40100) bypasses Caddy entirely and must be reachable directly —
+# that is why the firewall rules are still required.
+#
+# Replace sfu.example.com with your own subdomain before using this.
+sfu.example.com {
+	reverse_proxy localhost:4000
+}
