@@ -12,8 +12,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata = {
-  title: "Screen Monitor",
-  description: "Self-hosted office screen monitoring",
+  title: "KUMKUM — Meet",
+  description: "Group video calls with screen sharing",
 };
 
 export default function RootLayout({ children }) {

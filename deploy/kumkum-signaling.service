@@ -1,0 +1,25 @@
+# Install to /etc/systemd/system/kumkum-signaling.service
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now kumkum-signaling
+#   sudo journalctl -u kumkum-signaling -f
+[Unit]
+Description=KUMKUM signalling + mediasoup SFU
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/kumkum/signaling-server
+EnvironmentFile=/home/ubuntu/kumkum/signaling-server/.env
+ExecStart=/usr/bin/node server.js
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+
+# mediasoup opens one socket pair per transport; the default 1024 runs out fast.
+LimitNOFILE=65536
+
+[Install]
+WantedBy=multi-user.target
