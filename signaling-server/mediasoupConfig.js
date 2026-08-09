@@ -8,11 +8,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // can reach it. Leave unset for local dev (mediasoup falls back to listenIp).
 const ANNOUNCED_IP = process.env.MEDIASOUP_ANNOUNCED_IP || undefined;
 
-// Prebuilt worker binary (compiled in CI, committed to repo) so Render's
-// free-tier build never has to compile mediasoup's C++ worker itself.
-// Set this env var to point mediasoup at it before createWorker() runs.
-const PREBUILT_WORKER = path.join(__dirname, "prebuilt", "mediasoup-worker");
-process.env.MEDIASOUP_WORKER_BIN = PREBUILT_WORKER;
+
 
 export const workerSettings = {
   rtcMinPort: 40000,

@@ -1,3 +1,4 @@
+import "./mediasoupBootstrap.js";
 import { randomUUID } from "crypto";
 import * as mediasoup from "mediasoup";
 import {
