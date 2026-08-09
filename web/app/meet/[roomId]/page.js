@@ -28,7 +28,8 @@ export default function MeetRoomPage({ params }) {
   const videoProducerRef = useRef(null);
   const cameraTrackRef = useRef(null);
   const screenTrackRef = useRef(null);
-  const remoteStreamsRef = useRef(new Map()); // peerId -> MediaStream
+ const remoteStreamsRef = useRef(new Map()); // peerId -> MediaStream
+  const consumersByProducerRef = useRef(new Map()); // producerId -> {peerId, track, kind}
   const consumeQueueRef = useRef(Promise.resolve()); // serializes consumeProducer calls
   const pendingRef = useRef({
     transportCreate: new Map(), // direction -> {resolve}
@@ -84,6 +85,26 @@ export default function MeetRoomPage({ params }) {
     );
   }
 
+  // Removes one specific track (e.g. a peer's old camera track after they
+  // switch to screen share) from their persistent MediaStream, leaving any
+  // other tracks (audio, or the incoming new video track) untouched.
+  function removeRemoteProducerTrack(producerId) {
+    const info = consumersByProducerRef.current.get(producerId);
+    if (!info) return;
+    consumersByProducerRef.current.delete(producerId);
+
+    const stream = remoteStreamsRef.current.get(info.peerId);
+    if (stream) {
+      stream.removeTrack(info.track);
+      setRemoteTiles(
+        Array.from(remoteStreamsRef.current.entries()).map(([id, s]) => ({
+          peerId: id,
+          stream: s,
+        }))
+      );
+    }
+  }
+
   // Queued so overlapping calls (e.g. a peer's audio and video producers
   // arriving close together) never race on reading+writing remoteStreamsRef —
   // each call's full read-modify-write of the peer's MediaStream completes
@@ -121,6 +142,7 @@ export default function MeetRoomPage({ params }) {
     });
     send({ type: "meet-resume-consumer", consumerId });
 
+    consumersByProducerRef.current.set(producerId, { peerId, track: consumer.track, kind });
     addRemoteTrack(peerId, consumer.track);
 
     if (kind === "video") {
@@ -228,6 +250,11 @@ export default function MeetRoomPage({ params }) {
           break;
         }
 
+        case "meet-producer-closed": {
+          removeRemoteProducerTrack(msg.producerId);
+          break;
+        }
+
         case "meet-peer-left": {
           removeRemoteTile(msg.peerId);
           break;
@@ -314,7 +341,20 @@ export default function MeetRoomPage({ params }) {
     const screenTrack = screenStream.getVideoTracks()[0];
     screenTrackRef.current = screenTrack;
 
-    await videoProducerRef.current.replaceTrack({ track: screenTrack });
+    // Close the camera's video producer instead of swapping its track:
+    // replaceTrack() keeps the producer's original rtpParameters (negotiated
+    // for the camera's resolution/framerate), which mismatches the screen
+    // track's dimensions and shows as a blank/0x0 frame on the receiver.
+    // A fresh produce() call negotiates correct rtpParameters for the screen
+    // track from scratch.
+    const oldProducerId = videoProducerRef.current?.id;
+    if (oldProducerId) {
+      send({ type: "meet-close-producer", producerId: oldProducerId });
+      videoProducerRef.current.close();
+    }
+
+    const newProducer = await sendTransportRef.current.produce({ track: screenTrack });
+    videoProducerRef.current = newProducer;
 
     // Show the screen in your own preview too, keeping your mic audio track.
     const previewStream = new MediaStream([
@@ -331,8 +371,15 @@ export default function MeetRoomPage({ params }) {
     screenTrackRef.current?.stop();
     screenTrackRef.current = null;
 
-    if (cameraTrackRef.current && videoProducerRef.current) {
-      await videoProducerRef.current.replaceTrack({ track: cameraTrackRef.current });
+    const oldProducerId = videoProducerRef.current?.id;
+    if (oldProducerId) {
+      send({ type: "meet-close-producer", producerId: oldProducerId });
+      videoProducerRef.current.close();
+    }
+
+    if (cameraTrackRef.current && sendTransportRef.current) {
+      const newProducer = await sendTransportRef.current.produce({ track: cameraTrackRef.current });
+      videoProducerRef.current = newProducer;
     }
     if (localVideoRef.current) localVideoRef.current.srcObject = localStreamRef.current;
 

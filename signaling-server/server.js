@@ -308,6 +308,27 @@ async function handleMeetMessage(ws, msg) {
       break;
     }
 
+    case "meet-close-producer": {
+      const { room, peer } = currentMeetPeer(ws);
+      if (!room || !peer) return;
+      const producer = peer.producers.get(msg.producerId);
+      if (!producer) return;
+
+      producer.close();
+      peer.producers.delete(msg.producerId);
+      console.log(`[meet] peer ${ws.meta.peerId} closed producer ${msg.producerId}`);
+
+      for (const [otherId, otherPeer] of room.peers) {
+        if (otherId === ws.meta.peerId) continue;
+        send(otherPeer.ws, {
+          type: "meet-producer-closed",
+          producerId: msg.producerId,
+          peerId: ws.meta.peerId,
+        });
+      }
+      break;
+    }
+
     case "meet-consume": {
       const { room, peer } = currentMeetPeer(ws);
       if (!room || !peer) return;
