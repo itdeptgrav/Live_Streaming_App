@@ -71,6 +71,7 @@ export default function MeetRoomPage({ params }) {
       Array.from(remoteStreamsRef.current.entries()).map(([id, s]) => ({
         peerId: id,
         stream: s,
+        videoTrackId: s.getVideoTracks()[0]?.id ?? null,
       }))
     );
   }
@@ -81,6 +82,7 @@ export default function MeetRoomPage({ params }) {
       Array.from(remoteStreamsRef.current.entries()).map(([id, s]) => ({
         peerId: id,
         stream: s,
+        videoTrackId: s.getVideoTracks()[0]?.id ?? null,
       }))
     );
   }
@@ -100,6 +102,7 @@ export default function MeetRoomPage({ params }) {
         Array.from(remoteStreamsRef.current.entries()).map(([id, s]) => ({
           peerId: id,
           stream: s,
+          videoTrackId: s.getVideoTracks()[0]?.id ?? null,
         }))
       );
     }
@@ -510,7 +513,11 @@ export default function MeetRoomPage({ params }) {
           )}
         </div>
         {remoteTiles.map((tile) => (
-          <RemoteVideo key={tile.peerId} stream={tile.stream} peerId={tile.peerId} />
+          <RemoteVideo
+            key={`${tile.peerId}:${tile.videoTrackId}`}
+            stream={tile.stream}
+            peerId={tile.peerId}
+          />
         ))}
       </div>
     </main>
