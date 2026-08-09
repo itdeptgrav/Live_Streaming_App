@@ -1,77 +1,98 @@
 "use client";
 
-import { useState } from "react";
-import { useRouter } from "next/navigation";
+import { useEffect, useRef, useState } from "react";
 import Link from "next/link";
-import { createMeetRoom } from "@/lib/realtime";
 
-export default function Home() {
-  const router = useRouter();
-  const [creating, setCreating] = useState(false);
-  const [joinCode, setJoinCode] = useState("");
+const SIGNALING_URL = process.env.NEXT_PUBLIC_SIGNALING_URL;
+
+export default function Dashboard() {
+  const [rooms, setRooms] = useState(null);
   const [error, setError] = useState(null);
+  const wsRef = useRef(null);
 
-  async function handleCreate() {
-    setCreating(true);
-    setError(null);
-    try {
-      const { roomId } = await createMeetRoom();
-      router.push(`/meet/${roomId}`);
-    } catch {
-      setError("Could not reach the realtime server. Check NEXT_PUBLIC_SIGNALING_URL.");
-      setCreating(false);
-    }
-  }
+  useEffect(() => {
+    const ws = new WebSocket(SIGNALING_URL);
+    wsRef.current = ws;
 
-  function handleJoin() {
-    const code = joinCode.trim().replace(/.*\/meet\//, "");
-    if (code) router.push(`/meet/${code}`);
-  }
+    ws.onopen = () => {
+      setError(null);
+      ws.send(JSON.stringify({ type: "list-rooms" }));
+    };
+    ws.onmessage = (event) => {
+      const msg = JSON.parse(event.data);
+      if (msg.type === "room-list") {
+        setError(null);
+        setRooms(msg.rooms);
+      }
+    };
+    ws.onerror = () => {
+      // In dev, React Strict Mode mounts effects twice, closing this socket
+      // before it opens and firing a spurious error — only surface it if the
+      // second (real) connection never comes through.
+      if (ws === wsRef.current) setError("Could not reach signaling server");
+    };
+
+    const interval = setInterval(() => {
+      if (ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: "list-rooms" }));
+      }
+    }, 4000);
+
+    return () => {
+      clearInterval(interval);
+      ws.close();
+    };
+  }, []);
 
   return (
-    <main className="flex-1 max-w-xl mx-auto w-full p-8 flex flex-col gap-6">
-      <div>
-        <h1 className="text-3xl font-semibold">KUMKUM</h1>
-        <p className="text-sm text-zinc-500 mt-1">
-          Group video calls with screen sharing. Create a room, share the link, and
-          anyone with it can join — no account needed.
-        </p>
-      </div>
-
-      {error && <p className="text-red-600 text-sm">{error}</p>}
-
-      <button
-        onClick={handleCreate}
-        disabled={creating}
-        className="bg-black text-white dark:bg-white dark:text-black rounded px-4 py-3 disabled:opacity-50"
-      >
-        {creating ? "Creating…" : "Create a meeting"}
-      </button>
-
-      <div className="flex gap-2">
-        <input
-          value={joinCode}
-          onChange={(e) => setJoinCode(e.target.value)}
-          onKeyDown={(e) => e.key === "Enter" && handleJoin()}
-          placeholder="Paste a link or room code"
-          className="flex-1 border border-zinc-300 dark:border-zinc-700 rounded px-3 py-2 bg-transparent"
-        />
-        <button
-          onClick={handleJoin}
-          className="border border-zinc-300 dark:border-zinc-700 rounded px-4 py-2"
+    <main className="flex-1 max-w-4xl mx-auto w-full p-8">
+      <div className="flex items-center justify-between mb-6">
+        <h1 className="text-2xl font-semibold">Device Rooms</h1>
+        <Link
+          href="/meet"
+          className="text-sm bg-black text-white dark:bg-white dark:text-black rounded px-3 py-1.5"
         >
-          Join
-        </button>
+          Start a Meet call
+        </Link>
       </div>
 
-      <p className="text-xs text-zinc-500 border-t border-zinc-200 dark:border-zinc-800 pt-4">
-        Anyone with a room link can join — there is no password or waiting room.
-        Treat every link as public.{" "}
-        <Link href="/monitor" className="underline">
-          Office monitor mode
-        </Link>{" "}
-        is a separate, unrelated feature.
-      </p>
+      {error && <p className="text-red-600 mb-4">{error}</p>}
+      {!rooms && !error && <p className="text-zinc-500">Loading rooms…</p>}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 md:grid-cols-3 gap-4">
+        {rooms?.map((room) => (
+          <div
+            key={room.id}
+            className="border border-zinc-200 dark:border-zinc-800 rounded-lg p-4 flex flex-col gap-2"
+          >
+            <div className="flex items-center justify-between">
+              <span className="font-medium">{room.label}</span>
+              <span
+                className={`text-xs px-2 py-0.5 rounded-full ${
+                  room.live
+                    ? "bg-green-100 text-green-700 dark:bg-green-900 dark:text-green-300"
+                    : "bg-zinc-100 text-zinc-500 dark:bg-zinc-800"
+                }`}
+              >
+                {room.live ? "Live" : "Offline"}
+              </span>
+            </div>
+            <p className="text-sm text-zinc-500">
+              {room.viewerCount} viewer{room.viewerCount === 1 ? "" : "s"}
+            </p>
+            <Link
+              href={`/watch/${room.id}`}
+              className={`text-sm mt-2 text-center rounded px-3 py-1.5 ${
+                room.live
+                  ? "bg-black text-white dark:bg-white dark:text-black"
+                  : "bg-zinc-100 text-zinc-400 dark:bg-zinc-800 pointer-events-none"
+              }`}
+            >
+              View screen
+            </Link>
+          </div>
+        ))}
+      </div>
     </main>
   );
 }

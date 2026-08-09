@@ -11,10 +11,7 @@ import {
   roomIsFull,
   createWebRtcTransport,
   removePeer,
-  cancelReap,
-  roomCount,
 } from "./meetRooms.js";
-import { getAnnouncedAddress, getWorkerSettings } from "./mediasoupConfig.js";
 
 const PORT = process.env.PORT || 4000;
 // Comma-separated list, e.g. "https://your-app.vercel.app,http://localhost:3000"
@@ -76,20 +73,6 @@ const httpServer = http.createServer(async (req, res) => {
     const info = meetRoomInfo(infoMatch[1]);
     res.writeHead(info ? 200 : 404, { "Content-Type": "application/json" });
     res.end(JSON.stringify(info || { error: "not found" }));
-    return;
-  }
-
-  if (req.method === "GET" && (req.url === "/healthz" || req.url === "/")) {
-    res.writeHead(200, { "Content-Type": "application/json" });
-    res.end(
-      JSON.stringify({
-        ok: true,
-        announcedAddress: getAnnouncedAddress(),
-        rtcPorts: `${getWorkerSettings().rtcMinPort}-${getWorkerSettings().rtcMaxPort}`,
-        meetRooms: roomCount(),
-        uptimeSeconds: Math.round(process.uptime()),
-      })
-    );
     return;
   }
 
@@ -234,20 +217,11 @@ function handleMonitorMessage(ws, msg) {
 async function handleMeetMessage(ws, msg) {
   switch (msg.type) {
     case "meet-join": {
-      // Rooms live only in memory, so a server restart or a reap would turn
-      // every link you have already shared into a dead link. Recreate on demand
-      // for anything shaped like a room id — this is what makes an invite link
-      // durable.
-      let room = getMeetRoom(msg.roomId);
-      if (!room && /^[a-zA-Z0-9_-]{4,36}$/.test(msg.roomId || "")) {
-        room = createMeetRoomRecord(msg.roomId);
-        console.log(`[meet] recreated room ${msg.roomId} on join`);
-      }
+      const room = getMeetRoom(msg.roomId);
       if (!room) {
-        send(ws, { type: "error", message: "Invalid room id" });
+        send(ws, { type: "error", message: "Room does not exist" });
         return;
       }
-      cancelReap(room);
       if (roomIsFull(room)) {
         send(ws, { type: "error", message: "Room is full" });
         return;
@@ -470,18 +444,6 @@ function currentMeetPeer(ws) {
   return { room, peer };
 }
 
-httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log("=".repeat(64));
-  console.log(`Realtime server listening on 0.0.0.0:${PORT}`);
-  console.log(`mediasoup announced address : ${getAnnouncedAddress()}`);
-  const { rtcMinPort, rtcMaxPort } = getWorkerSettings();
-  console.log(`mediasoup RTC port range    : ${rtcMinPort}-${rtcMaxPort} (UDP + TCP)`);
-  console.log(`allowed origins             : ${ALLOWED_ORIGINS.join(", ")}`);
-  console.log("Open BOTH the cloud firewall AND the host iptables for those ports.");
-  console.log("=".repeat(64));
-});
-
-process.on("SIGTERM", () => {
-  console.log("SIGTERM received, shutting down");
-  httpServer.close(() => process.exit(0));
+httpServer.listen(PORT, () => {
+  console.log(`Realtime server (signaling + REST) listening on http://localhost:${PORT}`);
 });

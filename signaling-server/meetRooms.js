@@ -2,9 +2,9 @@ import "./mediasoupBootstrap.js";
 import { randomUUID } from "crypto";
 import * as mediasoup from "mediasoup";
 import {
-  getWorkerSettings,
+  workerSettings,
   routerMediaCodecs,
-  getWebRtcTransportOptions,
+  webRtcTransportOptions,
   MAX_MEET_PARTICIPANTS,
 } from "./mediasoupConfig.js";
 
@@ -12,7 +12,7 @@ let worker;
 
 async function getWorker() {
   if (!worker) {
-    worker = await mediasoup.createWorker(getWorkerSettings());
+    worker = await mediasoup.createWorker(workerSettings);
     worker.on("died", () => {
       console.error("mediasoup worker died, exiting so the process manager restarts us");
       process.exit(1);
@@ -29,28 +29,14 @@ export function generateRoomId() {
   return randomUUID().slice(0, 8);
 }
 
-// How long an empty room survives before its router is torn down. Without a
-// grace period, creating a room and sharing the link then closing your own tab
-// destroys the room before your invitees can arrive.
-const EMPTY_ROOM_TTL_MS = Number(process.env.EMPTY_ROOM_TTL_MS || 30 * 60 * 1000);
-
 export function createMeetRoomRecord(roomId) {
   meetRooms.set(roomId, {
     id: roomId,
     createdAt: Date.now(),
     router: null,
     peers: new Map(),
-    reapTimer: null,
   });
   return meetRooms.get(roomId);
-}
-
-// Call whenever someone joins, so a pending teardown is aborted.
-export function cancelReap(room) {
-  if (room?.reapTimer) {
-    clearTimeout(room.reapTimer);
-    room.reapTimer = null;
-  }
 }
 
 export function getMeetRoom(roomId) {
@@ -76,7 +62,7 @@ export function roomIsFull(room) {
 }
 
 export async function createWebRtcTransport(router) {
-  const transport = await router.createWebRtcTransport(getWebRtcTransportOptions());
+  const transport = await router.createWebRtcTransport(webRtcTransportOptions);
 
   console.log(
     `[transport ${transport.id}] candidates:`,
@@ -100,16 +86,7 @@ export function removePeer(room, peerId) {
   room.peers.delete(peerId);
 
   if (room.peers.size === 0) {
-    clearTimeout(room.reapTimer);
-    room.reapTimer = setTimeout(() => {
-      if (room.peers.size > 0) return;
-      room.router?.close();
-      meetRooms.delete(room.id);
-      console.log(`[meet] room ${room.id} reaped after being empty for ${EMPTY_ROOM_TTL_MS}ms`);
-    }, EMPTY_ROOM_TTL_MS);
+    room.router?.close();
+    meetRooms.delete(room.id);
   }
-}
-
-export function roomCount() {
-  return meetRooms.size;
 }

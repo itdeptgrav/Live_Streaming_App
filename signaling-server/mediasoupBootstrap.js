@@ -29,24 +29,3 @@ if (process.env.MEDIASOUP_WORKER_BIN) {
         `falling back to the locally compiled worker in node_modules`
     );
 }
-
-// ---- announced address ----------------------------------------------------
-// mediasoup MUST announce a routable address in its ICE candidates. If it
-// announces 0.0.0.0, Chrome silently discards every candidate, ICE never
-// leaves the "new" state, and no RTP ever flows — with perfectly clean
-// signalling logs. Order of preference:
-//   1. MEDIASOUP_ANNOUNCED_IP  (set this to your domain in production)
-//   2. the host's public IPv4, detected at boot
-//   3. 127.0.0.1               (local dev only)
-if (!process.env.MEDIASOUP_ANNOUNCED_IP) {
-  try {
-    const res = await fetch("https://api.ipify.org", { signal: AbortSignal.timeout(5000) });
-    const ip = (await res.text()).trim();
-    if (/^\d{1,3}(\.\d{1,3}){3}$/.test(ip)) {
-      process.env.MEDIASOUP_ANNOUNCED_IP = ip;
-      console.log(`[mediasoup] auto-detected public IP: ${ip}`);
-    }
-  } catch {
-    console.warn("[mediasoup] public IP detection failed — falling back to 127.0.0.1");
-  }
-}
