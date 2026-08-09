@@ -473,36 +473,13 @@ export default function MeetRoomPage({ params }) {
   useEffect(() => leave, []);
 
   const [shareLink, setShareLink] = useState("");
-  const [copied, setCopied] = useState(false);
   useEffect(() => setShareLink(window.location.href), []);
-
-  async function copyLink() {
-    try {
-      await navigator.clipboard.writeText(shareLink || window.location.href);
-    } catch {
-      // Clipboard API needs a secure context; fall back to a manual selection.
-      const el = document.createElement("textarea");
-      el.value = shareLink || window.location.href;
-      document.body.appendChild(el);
-      el.select();
-      document.execCommand("copy");
-      el.remove();
-    }
-    setCopied(true);
-    setTimeout(() => setCopied(false), 1800);
-  }
 
   if (!joined) {
     return (
       <main className="flex-1 max-w-md mx-auto w-full p-8 flex flex-col gap-4">
         <h1 className="text-2xl font-semibold">Join meeting</h1>
-        <p className="text-sm text-zinc-500 break-all">{shareLink}</p>
-        <button
-          onClick={copyLink}
-          className="self-start text-xs border border-zinc-300 dark:border-zinc-700 rounded px-2 py-1"
-        >
-          {copied ? "Link copied" : "Copy invite link"}
-        </button>
+        <p className="text-sm text-zinc-500 break-all">Link: {shareLink}</p>
         {error && <p className="text-red-600 text-sm">{error}</p>}
         <input
           value={displayName}
@@ -526,12 +503,6 @@ export default function MeetRoomPage({ params }) {
       <div className="flex items-center justify-between">
         <h1 className="text-xl font-semibold">Room {roomId}</h1>
         <div className="flex gap-2">
-          <button
-            onClick={copyLink}
-            className="rounded px-4 py-2 border border-zinc-300 dark:border-zinc-700"
-          >
-            {copied ? "Copied" : "Copy link"}
-          </button>
           <button
             onClick={toggleMic}
             className={`rounded px-4 py-2 ${micOn ? "bg-black text-white dark:bg-white dark:text-black" : "bg-red-600 text-white"
