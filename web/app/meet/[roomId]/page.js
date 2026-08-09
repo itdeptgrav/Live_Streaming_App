@@ -356,7 +356,17 @@ export default function MeetRoomPage({ params }) {
       videoProducerRef.current.close();
     }
 
-    const newProducer = await sendTransportRef.current.produce({ track: screenTrack });
+    // Explicit encodings: getDisplayMedia() tracks can report incomplete or
+    // not-yet-settled dimensions via getSettings() at the instant produce()
+    // is called, causing mediasoup-client's default encoding inference to
+    // negotiate a degenerate (0-bitrate/0-dimension) encoding — which is
+    // exactly the "0x0 forever" symptom on the receiving side. Passing
+    // encodings explicitly bypasses that inference entirely.
+    const newProducer = await sendTransportRef.current.produce({
+      track: screenTrack,
+      encodings: [{ maxBitrate: 3_000_000 }],
+      codecOptions: { videoGoogleStartBitrate: 1000 },
+    });
     videoProducerRef.current = newProducer;
 
     // Show the screen in your own preview too, keeping your mic audio track.
