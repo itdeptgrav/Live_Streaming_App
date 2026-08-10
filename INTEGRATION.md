@@ -220,7 +220,18 @@ buttons and nothing else.
 
 > **`ui=bare` still shows a start button when idle.** Opening the screen picker
 > requires a gesture inside the iframe, so with no button in the frame a share
-> can never begin. Once sharing starts, nothing is drawn.
+> can never begin. It carries your `startLabel` and `accent`, and once sharing
+> starts nothing is drawn at all.
+
+### There is no lobby
+
+The embed connects as soon as it loads — joining a room needs no permission and
+no gesture, so there is nothing to ask the user first. Viewers go straight to
+watching. Publishers in a `screen` room see only the share button, because
+`getDisplayMedia` is the one call a browser will not make without a click.
+
+Everything the session needs comes from the token and the query string, never
+from a dialog of ours in front of your users.
 
 ### Events from the iframe
 

@@ -119,15 +119,16 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
     }
   }, [connect, isViewer, mode, setError]);
 
-  // A viewer needs no permission prompt, so there is nothing to wait for — join
-  // as soon as the token is known. Publishers need a user gesture for the
-  // screen or camera prompt, so they get a button.
+  // Everyone connects on load. Joining a room needs no permission and no
+  // gesture, so making the user click through a lobby of ours first was pure
+  // ceremony. Only getDisplayMedia genuinely requires a gesture, so the screen
+  // button is the one thing that survives.
   const autoJoinedRef = useRef(false);
   useEffect(() => {
-    if (!token || !isViewer || autoJoinedRef.current || phase !== "idle") return;
+    if (!token || autoJoinedRef.current || phase !== "idle") return;
     autoJoinedRef.current = true;
     startSession();
-  }, [token, isViewer, phase, startSession]);
+  }, [token, phase, startSession]);
 
   useEffect(() => {
     if (phase !== "live") return;
@@ -399,14 +400,7 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
 
         {/* ---- publisher ---- */}
         {!isViewer && phase !== "live" && (
-          <PublisherLobby
-            mode={mode}
-            requireEntireScreen={requireEntireScreen}
-            busy={busy}
-            phase={phase}
-            onStart={startSession}
-            startLabel={ui.startLabel}
-          />
+          <Connecting phase={phase} onRetry={startSession} />
         )}
 
         {!isViewer && phase === "live" && (
@@ -427,6 +421,7 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
             requestKeyFrame={requestKeyFrame}
             selfPreview={ui.selfPreview}
             startLabel={ui.startLabel}
+            quiet={!ui.header && !ui.controls}
           />
         )}
       </div>
@@ -557,29 +552,24 @@ function StatusDot({ phase, sharing, role }) {
   );
 }
 
-function PublisherLobby({ mode, requireEntireScreen, busy, phase, onStart, startLabel }) {
-  const screenMode = mode === "screen";
+// No lobby, no dialog. Connecting needs no consent, so the only thing shown
+// before a session is live is whether it is still connecting or has failed.
+function Connecting({ phase, onRetry }) {
+  if (phase === "connecting" || phase === "idle") {
+    return (
+      <div className="grid flex-1 place-items-center">
+        <span className="h-5 w-5 animate-spin rounded-full border-2 border-zinc-600 border-t-transparent" />
+      </div>
+    );
+  }
   return (
     <div className="grid flex-1 place-items-center">
-      <div className="w-full max-w-md text-center">
-        <h1 className="text-lg font-semibold text-white">
-          {screenMode ? "Share your screen" : "Join this session"}
-        </h1>
-        <p className="mx-auto mt-2 max-w-sm text-[13px] leading-relaxed text-zinc-400">
-          {screenMode
-            ? requireEntireScreen
-              ? "You will be asked what to share. This session accepts a whole screen only."
-              : "You will be asked what to share — a screen, a window, or a tab."
-            : "Your camera and microphone will be requested next."}
-        </p>
-        <button
-          onClick={onStart}
-          disabled={busy || phase === "connecting"}
-          className="mt-5 w-full rounded-lg bg-white px-4 py-2.5 text-sm font-medium text-zinc-900 transition hover:bg-zinc-200 disabled:opacity-40"
-        >
-          {phase === "connecting" ? "Connecting…" : startLabel || "Continue"}
-        </button>
-      </div>
+      <button
+        onClick={onRetry}
+        className="rounded-lg px-4 py-2 text-sm font-medium ring-1 ring-white/15 hover:bg-white/5"
+      >
+        Retry
+      </button>
     </div>
   );
 }
@@ -601,10 +591,27 @@ function PublisherStage({
   requestKeyFrame,
   selfPreview = false,
   startLabel,
+  quiet = false,
 }) {
   const screenMode = mode === "screen";
 
   if (screenMode && !sharing) {
+    // bare: the button and nothing else. The host owns every other word on
+    // the page, so explaining ourselves here would just talk over them.
+    if (quiet) {
+      return (
+        <div className="grid flex-1 place-items-center">
+          <button
+            onClick={onStartShare}
+            disabled={busy}
+            style={{ background: "var(--accent)" }}
+            className="rounded-lg px-4 py-2 text-sm font-medium text-zinc-950 transition hover:opacity-90 disabled:opacity-40"
+          >
+            {busy ? "Waiting…" : startLabel || "Start sharing"}
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="grid flex-1 place-items-center rounded-xl bg-white/[0.02] ring-1 ring-white/8">
         <div className="max-w-sm px-6 text-center">
@@ -632,7 +639,7 @@ function PublisherStage({
   // Opt-in only: a preview of a whole display, shown on that display, is an
   // infinite mirror. Hosts that share a window may still want it.
   if (screenMode && sharing && !selfPreview) {
-    return <SharingConfirmation capture={sharing.capture} />;
+    return quiet ? <div className="flex-1" /> : <SharingConfirmation capture={sharing.capture} />;
   }
 
   return (

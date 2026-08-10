@@ -741,9 +741,21 @@ Content-Type: application/json
           </Callout>
           <Callout tone="emerald" title="bare still shows a start button when idle">
             Opening the screen picker requires a gesture inside the iframe, so
-            with no button in the frame a share could never begin. Once sharing
-            starts, nothing is drawn.
+            with no button in the frame a share could never begin. It carries
+            your <C>startLabel</C> and <C>accent</C>, and once sharing starts
+            nothing is drawn at all.
           </Callout>
+
+          <h3 className="pt-2 text-sm font-semibold">There is no lobby</h3>
+          <p className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            The embed connects as soon as it loads — joining a room needs no
+            permission and no gesture, so there is nothing to ask the user
+            first. Viewers go straight to watching. Publishers in a{" "}
+            <C>screen</C> room see only the share button, because{" "}
+            <C>getDisplayMedia</C> is the one call a browser will not make
+            without a click. Everything else comes from the token and the query
+            string, never from a dialog of ours in front of your users.
+          </p>
         </Section>
 
         {/* ------------------------------------------------------- events */}
