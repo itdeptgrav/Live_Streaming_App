@@ -241,6 +241,57 @@ single low-contrast `Grav Stream` line in the bottom-right corner, which
 appears once a screen is actually live. The watcher sees the desktop and
 nothing else.
 
+### Publishing from your own button (optional SDK)
+
+The share button lives inside the iframe because `getDisplayMedia` needs user
+activation in the document that calls it, and activation does not cross a
+cross-origin frame. If you would rather use **your own** button with no extra
+click, load the publisher SDK — it runs in your page, so your click is valid.
+
+```html
+<script src="https://live.grav.in/v1/grav-stream.js"></script>
+```
+
+```js
+// Fetch the token BEFORE the click. Transient user activation expires after
+// roughly five seconds, so a slow request inside the handler can spend it and
+// the picker is refused.
+let credentials = await fetch("/monitoring/go-online").then((r) => r.json());
+
+document.querySelector("#go-online").addEventListener("click", async () => {
+  try {
+    const session = await GravStream.share({
+      token: credentials.token,
+      serverUrl: credentials.url,
+    });
+    console.log("sharing", session.capture);  // { displaySurface, width, height, isEntireScreen, … }
+    session.on("ended", () => setOffline());
+    window.stopSharing = () => session.stop();
+  } catch (err) {
+    if (err.code !== "CANCELLED") showError(err.message);
+  }
+});
+```
+
+- **41 KB gzipped.** No npm install, no bundler, no framework.
+- **Publishing only.** Watching stays on the iframe, which has no gesture
+  constraint and already renders video.
+- `GravStream.share()` rejects with a `code` before prompting:
+  `TOKEN_REQUIRED`, `TOKEN_INVALID`, `TOKEN_IS_VIEWER`, `TOKEN_EXPIRED`,
+  `SERVER_URL_REQUIRED`, `CANCELLED`, `PERMISSION_DENIED`,
+  `ENTIRE_SCREEN_REQUIRED`, `SURFACE_UNKNOWN`, `SERVER_UNREACHABLE`.
+- Pass `requireEntireScreen: true` to refuse a window or tab locally as well as
+  at the server.
+- `session.capture` carries the same fields as the `screen-share-started` event,
+  including `isEntireScreen`.
+- `session.stop()` ends the share; `session.on("ended", …)` fires when the user
+  stops it from the browser's own bar, or the connection drops.
+
+`share()` must be reached from the click without a slow `await` in front of it.
+Everything it needs — the capture prompt — happens first, and the network
+connection is opened afterwards, so the activation is spent as early as
+possible.
+
 ### There is no lobby
 
 The embed connects as soon as it loads — joining a room needs no permission and

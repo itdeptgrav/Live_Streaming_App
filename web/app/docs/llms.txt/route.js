@@ -235,6 +235,46 @@ user must press the embed's own button. Stop, mute and leave always work.
 The embed must also be visible when a share starts. A display:none, zero-sized
 or fully covered frame gets no picker; the embed reports EMBED_NOT_VISIBLE.
 
+## Optional publisher SDK
+
+The share button lives inside the iframe because getDisplayMedia needs user
+activation in the document that calls it, and activation does not cross a
+cross-origin frame boundary. The SDK runs in the host page, so the host's own
+button works with no extra click and no visible frame.
+
+    <script src="${EMBED}/v1/grav-stream.js"></script>
+
+    // Fetch the token BEFORE the click: transient activation expires after
+    // roughly five seconds, so a slow request inside the handler can spend it.
+    let credentials = await fetch("/monitoring/go-online").then(r => r.json());
+
+    button.addEventListener("click", async () => {
+      try {
+        const session = await GravStream.share({
+          token: credentials.token,
+          serverUrl: credentials.url,
+        });
+        session.capture;                    // { displaySurface, width, height, isEntireScreen, frameRate, label }
+        session.on("ended", () => setOffline());
+        session.stop();                     // to end it
+      } catch (err) {
+        if (err.code !== "CANCELLED") showError(err.message);
+      }
+    });
+
+- 41 KB gzipped, loaded from a script tag. No npm install, bundler or framework.
+- Publishing only. Watching stays on the iframe, which has no gesture
+  constraint and already renders video.
+- Options: { token, serverUrl, requireEntireScreen = false, maxBitrate = 3000000 }
+- Rejects with err.code before prompting: TOKEN_REQUIRED, TOKEN_INVALID,
+  TOKEN_IS_VIEWER, TOKEN_EXPIRED, SERVER_URL_REQUIRED, CANCELLED,
+  PERMISSION_DENIED, ENTIRE_SCREEN_REQUIRED, SURFACE_UNKNOWN,
+  SERVER_UNREACHABLE, PUBLISH_FAILED, TIMEOUT.
+- session.on("ended") fires when the user stops from the browser's own bar or
+  the connection drops.
+
+Use the SDK for the person sharing, and the iframe for the people watching.
+
 ## Screen selection: reporting versus enforcement
 
 The surface is ALWAYS reported. Whether a non-conforming pick is REFUSED is a

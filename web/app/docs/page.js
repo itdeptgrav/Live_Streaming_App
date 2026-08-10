@@ -771,6 +771,49 @@ Content-Type: application/json
             nothing else.
           </p>
 
+          <h3 className="pt-2 text-sm font-semibold">
+            Publishing from your own button (optional SDK)
+          </h3>
+          <p className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            The share button lives inside the iframe because{" "}
+            <C>getDisplayMedia</C> needs user activation in the document that
+            calls it, and activation does not cross a cross-origin frame. If you
+            would rather use <strong>your own</strong> button with no extra
+            click, load the publisher SDK — it runs in your page, so your click
+            is valid. It is 41&nbsp;KB gzipped, needs no npm install or bundler,
+            and covers publishing only; watching stays on the iframe.
+          </p>
+          <pre className={PRE}>
+            <code>{`<script src="https://live.grav.in/v1/grav-stream.js"></script>
+
+// Fetch the token BEFORE the click: transient activation expires after
+// roughly five seconds, so a slow request inside the handler can spend it.
+let credentials = await fetch("/monitoring/go-online").then((r) => r.json());
+
+button.addEventListener("click", async () => {
+  try {
+    const session = await GravStream.share({
+      token: credentials.token,
+      serverUrl: credentials.url,
+    });
+    session.capture;                  // { displaySurface, width, height, isEntireScreen }
+    session.on("ended", () => setOffline());
+    // session.stop() to end it
+  } catch (err) {
+    if (err.code !== "CANCELLED") showError(err.message);
+  }
+});`}</code>
+          </pre>
+          <p className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            <C>share()</C> rejects with a <C>code</C> before prompting:{" "}
+            <C>TOKEN_REQUIRED</C>, <C>TOKEN_INVALID</C>, <C>TOKEN_IS_VIEWER</C>,{" "}
+            <C>TOKEN_EXPIRED</C>, <C>SERVER_URL_REQUIRED</C>, <C>CANCELLED</C>,{" "}
+            <C>PERMISSION_DENIED</C>, <C>ENTIRE_SCREEN_REQUIRED</C>,{" "}
+            <C>SURFACE_UNKNOWN</C>, <C>SERVER_UNREACHABLE</C>. Pass{" "}
+            <C>requireEntireScreen: true</C> to refuse a window or tab locally
+            as well as at the server.
+          </p>
+
           <h3 className="pt-2 text-sm font-semibold">There is no lobby</h3>
           <p className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
             The embed connects as soon as it loads — joining a room needs no
