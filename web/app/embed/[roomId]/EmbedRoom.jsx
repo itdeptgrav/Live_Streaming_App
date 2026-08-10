@@ -76,7 +76,13 @@ export default function EmbedRoom({ roomId, token, parentOrigin }) {
     [roomId]
   );
 
+  // Guarded so integrators receive exactly one `ready` per load. Without this,
+  // React StrictMode's double-invoked effects emit it twice in development and
+  // a host app that starts work on `ready` would do it twice too.
+  const readySentRef = useRef(false);
   useEffect(() => {
+    if (readySentRef.current) return;
+    readySentRef.current = true;
     emit("ready");
   }, [emit]);
 

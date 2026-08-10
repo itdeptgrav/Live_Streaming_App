@@ -1,0 +1,11 @@
+{
+  "name": "grav-stream-reference-integration",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Standalone example consuming the Grav Stream REST API and embed URL. No dependencies.",
+  "main": "server.js",
+  "scripts": {
+    "start": "node server.js"
+  }
+}

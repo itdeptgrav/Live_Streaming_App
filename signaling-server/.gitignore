@@ -34,6 +34,13 @@ yarn-error.log*
 .env*
 !.env.example
 
+# SQLite database written when DATA_DIR is unset (local dev default).
+# Never commit it: it holds password hashes and API key hashes.
+/data/
+*.db
+*.db-shm
+*.db-wal
+
 # vercel
 .vercel
 
