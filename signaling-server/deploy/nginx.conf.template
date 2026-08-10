@@ -1,0 +1,23 @@
+# Nginx reverse proxy: terminates TLS (wss://) and forwards to the Node
+# signaling server on 127.0.0.1:4000. Media (RTP/UDP) does NOT go through
+# this — it flows directly between browsers and mediasoup on the UDP port
+# range, so this file only needs to handle the WebSocket/HTTP signaling.
+#
+# Usage: replace YOUR_DOMAIN below, drop this in /etc/nginx/sites-available/,
+# symlink into sites-enabled, then run certbot (see setup.sh) — certbot
+# rewrites this file in place to add the ssl_certificate lines.
+
+server {
+    listen 80;
+    server_name YOUR_DOMAIN;
+
+    location / {
+        proxy_pass http://127.0.0.1:4000;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_read_timeout 3600s;
+    }
+}
