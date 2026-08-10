@@ -249,6 +249,15 @@
         try {
           const res = await fetch("/api/meetings/" + currentRoom);
           const info = await res.json();
+          // A 404 means the room is gone for good — usually a stale tab left
+          // polling after a server restart. Stop rather than retry forever.
+          if (res.status === 404) {
+            stopPolling();
+            $("status").textContent =
+              "Room " + currentRoom + " no longer exists. Create or join a new one.";
+            currentRoom = null;
+            return;
+          }
           if (!res.ok) throw new Error(info.error);
           const names = (info.participants || []).map((p) => p.name).join(", ");
           $("status").innerHTML =
