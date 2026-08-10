@@ -1,245 +1,185 @@
 "use client";
 
-// Embeddable meeting surface. This is the entire integration story for a
-// customer: mint a room token on their backend, then point an iframe here.
-// No SDK, no npm package, no WebRTC code on their side.
+// The embeddable surface. One URL serves two very different jobs, decided by
+// the token's role:
 //
-//   <iframe src="https://live.grav.in/embed/<roomId>?token=<token>"
-//           allow="camera; microphone; display-capture; autoplay" />
+//   publisher - shares a screen (or camera, in meeting rooms)
+//   viewer    - watches, and is never asked for camera or microphone
 //
-// The media plumbing below is the same mediasoup flow the standalone /meet
-// page uses — including the keyframe-nudge workaround for black screen-share
-// tiles — with room tokens, participant identity, and a postMessage bridge
-// added so the host page can observe and control the call without an SDK.
+// Everything the host page needs is delivered over postMessage, so integrating
+// products need no SDK and no WebRTC code.
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { Device } from "mediasoup-client";
-import { SIGNALING_URL } from "@/lib/realtime";
-import { getIceServers } from "@/lib/webrtcConfig";
+import { readRoomTokenClaims, surfaceLabel } from "@/lib/roomToken";
+import { captureScreen } from "@/lib/screenCapture";
+import { useRoomConnection } from "./useRoomConnection";
 
 const CHANNEL = "grav-stream";
 const PARENT_CHANNEL = "grav-stream-parent";
 
-export default function EmbedRoom({ roomId, token, parentOrigin }) {
-  // Kept in a ref, not state: it is never rendered, and letting it change
-  // `emit`'s identity would re-run the teardown effect and end a live call.
-  const parentOriginRef = useRef(parentOrigin || "*");
-  const [joined, setJoined] = useState(false);
-  const [status, setStatus] = useState("idle");
-  const [error, setError] = useState(null);
+export default function EmbedRoom({ roomId, token, parentOrigin = "*" }) {
+  const claims = useMemo(() => readRoomTokenClaims(token), [token]);
 
-  const [videoTiles, setVideoTiles] = useState([]);
-  const [audioTiles, setAudioTiles] = useState([]);
-  const [peers, setPeers] = useState([]); // [{peerId, identity, name}]
-  const [self, setSelf] = useState({ identity: null, name: "You" });
+  const originRef = useRef(parentOrigin);
+  useEffect(() => {
+    originRef.current = parentOrigin;
+  }, [parentOrigin]);
 
-  const [sharingScreen, setSharingScreen] = useState(false);
-  const [micOn, setMicOn] = useState(true);
-  const [cameraOn, setCameraOn] = useState(true);
+  const emit = useCallback((type, payload = {}) => {
+    if (typeof window === "undefined" || window.parent === window) return;
+    window.parent.postMessage({ source: CHANNEL, type, ...payload }, originRef.current);
+  }, []);
 
-  const localVideoRef = useRef(null);
-  const localScreenRef = useRef(null);
+  const room = useRoomConnection({ roomId, token, onEvent: emit });
+  const {
+    phase,
+    error,
+    setError,
+    session,
+    peers,
+    videoTracks,
+    audioTracks,
+    connect,
+    publish,
+    unpublish,
+    reportMediaState,
+    requestKeyFrame,
+    disconnect,
+  } = room;
 
-  const wsRef = useRef(null);
-  const iceServersRef = useRef(null);
-  const deviceRef = useRef(null);
-  const sendTransportRef = useRef(null);
-  const recvTransportRef = useRef(null);
+  // Server-confirmed values win; token claims only bridge the first paint.
+  const role = session?.role || claims?.role || "publisher";
+  const mode = session?.mode || claims?.mode || "meeting";
+  const requireEntireScreen = session?.requireEntireScreen ?? claims?.requireEntireScreen ?? false;
+  const isViewer = role === "viewer";
 
-  const localStreamRef = useRef(null);
+  const [sharing, setSharing] = useState(null); // { capture }
+  const [micOn, setMicOn] = useState(false);
+  const [cameraOn, setCameraOn] = useState(false);
+  const [busy, setBusy] = useState(false);
+  // Whether a producer exists at all, as opposed to whether it is currently
+  // unmuted. State rather than a ref read, so the controls appear the moment
+  // publishing succeeds.
+  const [hasMic, setHasMic] = useState(false);
+  const [hasCamera, setHasCamera] = useState(false);
+
   const screenStreamRef = useRef(null);
-
+  const screenProducerRef = useRef(null);
   const micProducerRef = useRef(null);
   const cameraProducerRef = useRef(null);
-  const screenProducerRef = useRef(null);
+  const localStreamRef = useRef(null);
+  const localScreenVideoRef = useRef(null);
+  const localCameraVideoRef = useRef(null);
 
-  const remoteVideosRef = useRef(new Map());
-  const remoteAudiosRef = useRef(new Map());
-  const peersRef = useRef(new Map());
-
-  const consumeQueueRef = useRef(Promise.resolve());
-  // rid -> {resolve, reject}. The server echoes `rid` on every reply, so
-  // concurrent requests of the same type can never resolve each other's promise.
-  const pendingRef = useRef(new Map());
-  const ridRef = useRef(0);
-
-  // ---------------- parent bridge ----------------
-
-  const emit = useCallback(
-    (type, payload = {}) => {
-      if (typeof window === "undefined" || window.parent === window) return;
-      window.parent.postMessage(
-        { source: CHANNEL, type, roomId, ...payload },
-        parentOriginRef.current
-      );
-    },
-    [roomId]
-  );
-
-  // Guarded so integrators receive exactly one `ready` per load. Without this,
-  // React StrictMode's double-invoked effects emit it twice in development and
-  // a host app that starts work on `ready` would do it twice too.
   const readySentRef = useRef(false);
   useEffect(() => {
     if (readySentRef.current) return;
     readySentRef.current = true;
-    emit("ready");
-  }, [emit]);
+    emit("ready", { roomId, role: claims?.role, mode: claims?.mode });
+  }, [emit, roomId, claims]);
 
+  // Checked in an effect rather than during render: reading the clock while
+  // rendering is impure, and an expiry that lands mid-session should surface
+  // as an error rather than silently swapping the whole view.
+  const [expired, setExpired] = useState(false);
   useEffect(() => {
-    if (joined) emit("participants-changed", { count: peers.length + 1 });
-  }, [peers.length, joined, emit]);
+    if (!claims?.expiresAt) return;
+    const check = () => setExpired(claims.expiresAt < Date.now());
+    check();
+    const timer = setInterval(check, 30000);
+    return () => clearInterval(timer);
+  }, [claims]);
 
-  useEffect(() => {
-    if (joined && localVideoRef.current && localStreamRef.current) {
-      localVideoRef.current.srcObject = localStreamRef.current;
-    }
-  }, [joined]);
+  // ---------------- connect ----------------
 
-  useEffect(() => {
-    if (sharingScreen && localScreenRef.current && screenStreamRef.current) {
-      localScreenRef.current.srcObject = screenStreamRef.current;
-    }
-  }, [sharingScreen]);
-
-  // ---------------- signaling helpers ----------------
-
-  function send(msg) {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify(msg));
-    }
-  }
-
-  /** Sends a message and resolves with the reply carrying the same rid. */
-  function request(msg, { timeoutMs = 10000 } = {}) {
-    const rid = `r${++ridRef.current}`;
-    return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pendingRef.current.delete(rid);
-        reject(new Error(`${msg.type} timed out`));
-      }, timeoutMs);
-
-      pendingRef.current.set(rid, {
-        resolve: (value) => {
-          clearTimeout(timer);
-          pendingRef.current.delete(rid);
-          resolve(value);
-        },
-        reject: (err) => {
-          clearTimeout(timer);
-          pendingRef.current.delete(rid);
-          reject(err);
-        },
-      });
-      send({ ...msg, rid });
-    });
-  }
-
-  function syncTiles() {
-    setVideoTiles(
-      Array.from(remoteVideosRef.current.entries()).map(([producerId, v]) => ({
-        producerId,
-        peerId: v.peerId,
-        source: v.source,
-        stream: v.stream,
-        consumerId: v.consumerId,
-      }))
-    );
-    setAudioTiles(
-      Array.from(remoteAudiosRef.current.entries()).map(([producerId, a]) => ({
-        producerId,
-        stream: a.stream,
-      }))
-    );
-  }
-
-  function syncPeers() {
-    setPeers(Array.from(peersRef.current.values()));
-  }
-
-  // Each remote track gets its own MediaStream that is never mutated, so the
-  // <video> element never reloads mid-call (the source of black 0x0 tiles).
-  function addRemoteConsumer({ producerId, peerId, source, consumer }) {
-    const stream = new MediaStream([consumer.track]);
-    const entry = { peerId, source, stream, consumerId: consumer.id, consumer };
-    if (consumer.kind === "video") remoteVideosRef.current.set(producerId, entry);
-    else remoteAudiosRef.current.set(producerId, entry);
-    syncTiles();
-  }
-
-  function removeRemoteProducer(producerId) {
-    for (const map of [remoteVideosRef.current, remoteAudiosRef.current]) {
-      const entry = map.get(producerId);
-      if (!entry) continue;
-      try {
-        entry.consumer.close();
-      } catch {}
-      map.delete(producerId);
-    }
-    syncTiles();
-  }
-
-  function removePeerTiles(peerId) {
-    for (const map of [remoteVideosRef.current, remoteAudiosRef.current]) {
-      for (const [producerId, entry] of map) {
-        if (entry.peerId !== peerId) continue;
-        try {
-          entry.consumer.close();
-        } catch {}
-        map.delete(producerId);
-      }
-    }
-    peersRef.current.delete(peerId);
-    syncPeers();
-    syncTiles();
-  }
-
-  function consumeProducer(producerId, peerId, source) {
-    const run = () => doConsumeProducer(producerId, peerId, source);
-    consumeQueueRef.current = consumeQueueRef.current.then(run, run);
-    return consumeQueueRef.current;
-  }
-
-  async function doConsumeProducer(producerId, peerId, source) {
-    if (!recvTransportRef.current || !deviceRef.current) return;
-
-    let reply;
-    try {
-      reply = await request({
-        type: "meet-consume",
-        transportId: recvTransportRef.current.id,
-        producerId,
-        rtpCapabilities: deviceRef.current.rtpCapabilities,
-      });
-    } catch (err) {
-      console.error(`[consume] producer ${producerId} failed:`, err.message);
-      return;
-    }
-
-    const consumer = await recvTransportRef.current.consume({
-      id: reply.consumerId,
-      producerId,
-      kind: reply.kind,
-      rtpParameters: reply.rtpParameters,
-    });
-    send({ type: "meet-resume-consumer", consumerId: reply.consumerId });
-
-    addRemoteConsumer({
-      producerId,
-      peerId: peerId || reply.peerId,
-      source: source || reply.source || (reply.kind === "audio" ? "mic" : "camera"),
-      consumer,
-    });
-  }
-
-  // ---------------- join ----------------
-
-  async function join() {
-    setStatus("connecting");
+  const startSession = useCallback(async () => {
     setError(null);
+    setBusy(true);
+    try {
+      await connect({ needsSendTransport: !isViewer });
+    } catch {
+      // connect() already surfaced the message.
+    } finally {
+      setBusy(false);
+    }
+  }, [connect, isViewer, setError]);
 
-    // Camera and mic are requested separately so a busy or missing webcam
-    // cannot block the join outright.
+  // A viewer needs no permission prompt, so there is nothing to wait for — join
+  // as soon as the token is known. Publishers need a user gesture for the
+  // screen or camera prompt, so they get a button.
+  const autoJoinedRef = useRef(false);
+  useEffect(() => {
+    if (!token || !isViewer || autoJoinedRef.current || phase !== "idle") return;
+    autoJoinedRef.current = true;
+    startSession();
+  }, [token, isViewer, phase, startSession]);
+
+  useEffect(() => {
+    if (phase !== "live") return;
+    reportMediaState({ mic: micOn, camera: cameraOn, screen: Boolean(sharing) });
+    emit("media-state", { mic: micOn, camera: cameraOn, screen: Boolean(sharing) });
+  }, [micOn, cameraOn, sharing, phase, reportMediaState, emit]);
+
+  // ---------------- screen sharing ----------------
+
+  const stopScreenShare = useCallback(
+    ({ silent = false } = {}) => {
+      unpublish(screenProducerRef.current);
+      screenProducerRef.current = null;
+      screenStreamRef.current?.getTracks().forEach((t) => t.stop());
+      screenStreamRef.current = null;
+      setSharing(null);
+      if (!silent) emit("screen-share-stopped", {});
+    },
+    [unpublish, emit]
+  );
+
+  const startScreenShare = useCallback(async () => {
+    setError(null);
+    setBusy(true);
+    try {
+      const { stream, track, capture } = await captureScreen({ requireEntireScreen });
+      screenStreamRef.current = stream;
+
+      try {
+        screenProducerRef.current = await publish({
+          track,
+          source: "screen",
+          displaySurface: capture.displaySurface,
+          width: capture.width,
+          height: capture.height,
+          encodings: [{ maxBitrate: 3_000_000 }],
+          codecOptions: { videoGoogleStartBitrate: 1000 },
+        });
+      } catch (err) {
+        stream.getTracks().forEach((t) => t.stop());
+        screenStreamRef.current = null;
+        throw err;
+      }
+
+      setSharing({ capture });
+      emit("screen-share-started", { ...capture });
+
+      // The browser's own "Stop sharing" bar ends the track without telling us.
+      track.onended = () => stopScreenShare();
+    } catch (err) {
+      if (err.code === "CANCELLED") {
+        emit("screen-share-cancelled", {});
+      } else {
+        setError(err.message);
+        emit("error", { message: err.message, code: err.code, capture: err.capture });
+      }
+    } finally {
+      setBusy(false);
+    }
+  }, [requireEntireScreen, publish, emit, setError, stopScreenShare]);
+
+  // ---------------- camera / mic (meeting rooms) ----------------
+
+  const enableCameraAndMic = useCallback(async () => {
+    setError(null);
+    setBusy(true);
+    // Requested separately so a busy or missing webcam cannot block audio too.
     let audioTrack = null;
     let videoTrack = null;
     try {
@@ -253,286 +193,94 @@ export default function EmbedRoom({ roomId, token, parentOrigin }) {
 
     if (!audioTrack && !videoTrack) {
       const message =
-        "Camera and microphone are blocked. If this meeting is embedded, the " +
-        'iframe needs allow="camera; microphone; display-capture; autoplay".';
+        "Camera and microphone are unavailable. Check the browser permission " +
+        'prompt, and if this page is embedded, that the iframe has allow="camera; microphone".';
       setError(message);
-      emit("error", { message });
-      setStatus("idle");
+      emit("error", { message, code: "DEVICE_PERMISSION_DENIED" });
+      setBusy(false);
       return;
     }
-    if (!videoTrack) setCameraOn(false);
-    if (!audioTrack) setMicOn(false);
 
     localStreamRef.current = new MediaStream([audioTrack, videoTrack].filter(Boolean));
-    iceServersRef.current = await getIceServers();
-
-    const ws = new WebSocket(SIGNALING_URL);
-    wsRef.current = ws;
-
-    ws.onopen = () => send({ type: "meet-join", roomId, token });
-
-    ws.onerror = () => {
-      setError("Could not reach the realtime server");
-      emit("error", { message: "Could not reach the realtime server" });
-    };
-
-    ws.onclose = () => {
-      for (const [, p] of pendingRef.current) p.reject(new Error("socket closed"));
-      pendingRef.current.clear();
-    };
-
-    ws.onmessage = async (event) => {
-      const msg = JSON.parse(event.data);
-
-      // Any reply carrying a rid belongs to an in-flight request().
-      if (msg.rid && pendingRef.current.has(msg.rid)) {
-        const pending = pendingRef.current.get(msg.rid);
-        if (msg.type === "error") pending.reject(new Error(msg.message));
-        else pending.resolve(msg);
-        return;
-      }
-
-      switch (msg.type) {
-        case "meet-joined": {
-          try {
-            const device = new Device();
-            await device.load({ routerRtpCapabilities: msg.rtpCapabilities });
-            deviceRef.current = device;
-
-            setSelf({ identity: msg.identity, name: msg.displayName || "You" });
-            for (const p of msg.existingPeers || []) peersRef.current.set(p.peerId, p);
-            syncPeers();
-
-            await createSendTransport();
-            await createRecvTransport();
-
-            if (audioTrack) {
-              micProducerRef.current = await sendTransportRef.current.produce({
-                track: audioTrack,
-                stopTracks: false,
-                appData: { source: "mic" },
-              });
-            }
-            if (videoTrack) {
-              cameraProducerRef.current = await sendTransportRef.current.produce({
-                track: videoTrack,
-                stopTracks: false,
-                appData: { source: "camera" },
-              });
-            }
-
-            for (const p of msg.existingProducers) {
-              consumeProducer(p.producerId, p.peerId, p.source);
-            }
-
-            setJoined(true);
-            setStatus("live");
-            emit("joined", { peerId: msg.peerId, identity: msg.identity });
-          } catch (err) {
-            setError(err.message || "Failed to join the call");
-            emit("error", { message: err.message || "Failed to join the call" });
-            setStatus("idle");
-          }
-          break;
-        }
-
-        case "meet-peer-joined": {
-          peersRef.current.set(msg.peerId, {
-            peerId: msg.peerId,
-            identity: msg.identity,
-            name: msg.name,
-          });
-          syncPeers();
-          break;
-        }
-
-        case "meet-new-producer":
-          consumeProducer(msg.producerId, msg.peerId, msg.source);
-          break;
-
-        case "meet-producer-closed":
-          removeRemoteProducer(msg.producerId);
-          break;
-
-        case "meet-peer-left":
-          removePeerTiles(msg.peerId);
-          break;
-
-        case "error": {
-          console.error("Server error:", msg.message);
-          setError(msg.message);
-          emit("error", { message: msg.message });
-          break;
-        }
-
-        default:
-          break;
-      }
-    };
-  }
-
-  async function createSendTransport() {
-    const info = await request({ type: "meet-create-transport", direction: "send" });
-
-    const transport = deviceRef.current.createSendTransport({
-      id: info.transportId,
-      iceParameters: info.iceParameters,
-      iceCandidates: info.iceCandidates,
-      dtlsParameters: info.dtlsParameters,
-      iceServers: iceServersRef.current,
-    });
-    transport.on("connect", ({ dtlsParameters }, callback, errback) => {
-      request({ type: "meet-connect-transport", transportId: transport.id, dtlsParameters })
-        .then(() => callback())
-        .catch(errback);
-    });
-    // appData.source travels to the server so other peers can tell a screen
-    // producer apart from a camera producer and lay tiles out accordingly.
-    transport.on("produce", ({ kind, rtpParameters, appData }, callback, errback) => {
-      request({
-        type: "meet-produce",
-        transportId: transport.id,
-        kind,
-        rtpParameters,
-        source: appData?.source,
-      })
-        .then((reply) => callback({ id: reply.producerId }))
-        .catch(errback);
-    });
-
-    sendTransportRef.current = transport;
-  }
-
-  async function createRecvTransport() {
-    const info = await request({ type: "meet-create-transport", direction: "recv" });
-
-    const transport = deviceRef.current.createRecvTransport({
-      id: info.transportId,
-      iceParameters: info.iceParameters,
-      iceCandidates: info.iceCandidates,
-      dtlsParameters: info.dtlsParameters,
-      iceServers: iceServersRef.current,
-    });
-    transport.on("connect", ({ dtlsParameters }, callback, errback) => {
-      request({ type: "meet-connect-transport", transportId: transport.id, dtlsParameters })
-        .then(() => callback())
-        .catch(errback);
-    });
-
-    recvTransportRef.current = transport;
-  }
-
-  // ---------------- controls ----------------
-
-  const stopScreenShare = useCallback(() => {
-    const producer = screenProducerRef.current;
-    if (producer) {
-      send({ type: "meet-close-producer", producerId: producer.id });
-      producer.close(); // stopTracks defaults true, so the track stops too
-      screenProducerRef.current = null;
-    }
-    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
-    screenStreamRef.current = null;
-    setSharingScreen(false);
-  }, []);
-
-  const startScreenShare = useCallback(async () => {
-    if (screenProducerRef.current) return;
-    let screenStream;
     try {
-      screenStream = await navigator.mediaDevices.getDisplayMedia({
-        video: { frameRate: { ideal: 15, max: 30 } },
-      });
-    } catch {
-      return; // user dismissed the picker
-    }
-    const screenTrack = screenStream.getVideoTracks()[0];
-    if (!screenTrack) return;
-
-    // Tells the encoder this is text/UI, not motion video — keeps text legible
-    // and stops aggressive downscaling of a mostly-static screen.
-    if ("contentHint" in screenTrack) screenTrack.contentHint = "detail";
-    screenStreamRef.current = screenStream;
-
-    try {
-      screenProducerRef.current = await sendTransportRef.current.produce({
-        track: screenTrack,
-        encodings: [{ maxBitrate: 3_000_000 }],
-        codecOptions: { videoGoogleStartBitrate: 1000 },
-        appData: { source: "screen" },
-      });
+      if (audioTrack) {
+        micProducerRef.current = await publish({ track: audioTrack, source: "mic" });
+        setHasMic(true);
+        setMicOn(true);
+      }
+      if (videoTrack) {
+        cameraProducerRef.current = await publish({ track: videoTrack, source: "camera" });
+        setHasCamera(true);
+        setCameraOn(true);
+      }
     } catch (err) {
-      setError(`Could not start screen share: ${err.message}`);
-      screenStream.getTracks().forEach((t) => t.stop());
-      screenStreamRef.current = null;
-      return;
+      setError(err.message);
+      emit("error", { message: err.message, code: err.code });
     }
+    setBusy(false);
+  }, [publish, emit, setError]);
 
-    setSharingScreen(true);
-    screenTrack.onended = stopScreenShare; // the browser's own "Stop sharing" bar
-  }, [stopScreenShare]);
-
+  // Pausing the producer stops sending RTP entirely. Flipping track.enabled
+  // instead would keep transmitting black frames and silence, wasting the
+  // uplink on a connection we do not control.
   const toggleMic = useCallback(() => {
-    const track = micProducerRef.current?.track;
-    if (!track) return;
-    track.enabled = !track.enabled;
-    setMicOn(track.enabled);
+    const producer = micProducerRef.current;
+    if (!producer) return;
+    const next = producer.paused;
+    next ? producer.resume() : producer.pause();
+    setMicOn(next);
   }, []);
 
   const toggleCamera = useCallback(() => {
-    const track = cameraProducerRef.current?.track;
-    if (!track) return;
-    track.enabled = !track.enabled;
-    setCameraOn(track.enabled);
+    const producer = cameraProducerRef.current;
+    if (!producer) return;
+    const next = producer.paused;
+    next ? producer.resume() : producer.pause();
+    setCameraOn(next);
   }, []);
 
-  // Releases sockets, transports, and camera/mic. Touches no React state, so
-  // it is safe to call from an unmount cleanup — including React StrictMode's
-  // extra mount/unmount cycle in development, which would otherwise flip the
-  // UI to "ended" the instant the page loaded.
-  const teardown = useCallback(() => {
-    send({ type: "meet-leave" });
-    wsRef.current?.close();
-    screenStreamRef.current?.getTracks().forEach((t) => t.stop());
-    localStreamRef.current?.getTracks().forEach((t) => t.stop());
-    sendTransportRef.current?.close();
-    recvTransportRef.current?.close();
-    screenProducerRef.current = null;
-    cameraProducerRef.current = null;
-    micProducerRef.current = null;
-    screenStreamRef.current = null;
-    remoteVideosRef.current.clear();
-    remoteAudiosRef.current.clear();
-    peersRef.current.clear();
-  }, []);
-
-  // The deliberate "user hung up" path: tear down, then reflect it in the UI.
   const leave = useCallback(() => {
-    teardown();
-    setVideoTiles([]);
-    setAudioTiles([]);
-    setPeers([]);
-    setJoined(false);
-    setStatus("ended");
-    setSharingScreen(false);
-    emit("left");
-  }, [teardown, emit]);
+    stopScreenShare({ silent: true });
+    localStreamRef.current?.getTracks().forEach((t) => t.stop());
+    disconnect();
+    emit("left", {});
+  }, [stopScreenShare, disconnect, emit]);
 
-  useEffect(() => teardown, [teardown]);
+  // ---------------- local previews ----------------
 
-  // Parent-page control channel: lets the host app drive the call without an SDK.
+  useEffect(() => {
+    if (localScreenVideoRef.current && screenStreamRef.current) {
+      localScreenVideoRef.current.srcObject = screenStreamRef.current;
+    }
+  }, [sharing]);
+
+  useEffect(() => {
+    if (localCameraVideoRef.current && localStreamRef.current) {
+      localCameraVideoRef.current.srcObject = localStreamRef.current;
+    }
+  }, [cameraOn, phase]);
+
+  // ---------------- parent control channel ----------------
+
   useEffect(() => {
     function onMessage(event) {
       if (event.data?.source !== PARENT_CHANNEL) return;
       switch (event.data.type) {
+        case "start-screen-share":
+          if (!isViewer && !sharing) startScreenShare();
+          break;
+        case "stop-screen-share":
+          if (sharing) stopScreenShare();
+          break;
+        case "toggle-screen-share":
+          if (isViewer) break;
+          sharing ? stopScreenShare() : startScreenShare();
+          break;
         case "toggle-mic":
           toggleMic();
           break;
         case "toggle-camera":
           toggleCamera();
-          break;
-        case "toggle-screen-share":
-          sharingScreen ? stopScreenShare() : startScreenShare();
           break;
         case "leave":
           leave();
@@ -543,179 +291,493 @@ export default function EmbedRoom({ roomId, token, parentOrigin }) {
     }
     window.addEventListener("message", onMessage);
     return () => window.removeEventListener("message", onMessage);
-  }, [toggleMic, toggleCamera, leave, sharingScreen, startScreenShare, stopScreenShare]);
+  }, [isViewer, sharing, startScreenShare, stopScreenShare, toggleMic, toggleCamera, leave]);
 
-  // useCallback, not useRef().current — it is equally stable across renders but
-  // does not read a ref during render, which React flags as unsafe.
-  const requestKeyFrame = useCallback((consumerId) => {
-    if (wsRef.current?.readyState === WebSocket.OPEN) {
-      wsRef.current.send(JSON.stringify({ type: "meet-request-keyframe", consumerId }));
-    }
-  }, []);
+  // ---------------- derived view data ----------------
 
-  // Derived from peers STATE, not peersRef: a ref read during render would not
-  // re-render when a name arrives, leaving tiles labelled "Participant".
-  const peerNames = useMemo(
-    () => new Map(peers.map((p) => [p.peerId, p.name])),
+  const peerName = useCallback(
+    (peerId) => peers.find((p) => p.peerId === peerId)?.name || "Participant",
     [peers]
   );
-  const nameFor = (peerId) => peerNames.get(peerId) || "Participant";
+  const screenFeeds = videoTracks.filter((t) => t.source === "screen");
+  const cameraFeeds = videoTracks.filter((t) => t.source !== "screen");
+  const publishers = peers.filter((p) => p.role !== "viewer");
 
   // ---------------- render ----------------
 
-  if (status === "ended") {
+  if (!token || !claims) {
     return (
-      <div className="h-dvh w-full bg-zinc-950 text-zinc-300 flex items-center justify-center">
-        <p className="text-sm">You have left the meeting.</p>
-      </div>
+      <Shell>
+        <Notice
+          tone="warn"
+          title="This session link is not valid"
+          body="No room token was supplied. Your application must mint a token server-side and include it in the embed URL."
+        />
+      </Shell>
     );
   }
 
-  if (!joined) {
+  if (expired && phase !== "live") {
     return (
-      <div className="h-dvh w-full bg-zinc-950 text-white flex items-center justify-center p-6">
-        <div className="w-full max-w-sm flex flex-col gap-4">
-          <h1 className="text-lg font-semibold">Ready to join?</h1>
-          {!token && (
-            <p className="text-amber-400 text-sm">
-              No room token in the URL. This meeting must be opened with a
-              <code className="mx-1 text-xs">?token=</code>
-              minted by your backend.
-            </p>
-          )}
-          {error && <p className="text-red-400 text-sm">{error}</p>}
-          <button
-            onClick={join}
-            disabled={status === "connecting" || !token}
-            className="bg-white text-black rounded px-4 py-2 font-medium disabled:opacity-40"
-          >
-            {status === "connecting" ? "Joining…" : "Join meeting"}
-          </button>
-        </div>
-      </div>
+      <Shell>
+        <Notice
+          tone="warn"
+          title="This session link has expired"
+          body="Room tokens are short-lived. Refresh the page in your application to request a new one."
+        />
+      </Shell>
     );
   }
 
-  const screenTiles = videoTiles.filter((t) => t.source === "screen");
-  const cameraTiles = videoTiles.filter((t) => t.source !== "screen");
-  // A shared screen is the thing people are looking at — give it the stage and
-  // demote every camera, including the local one, to a filmstrip.
-  const hasStage = screenTiles.length > 0 || sharingScreen;
+  if (phase === "ended") {
+    return (
+      <Shell>
+        <Notice title="Session ended" body="You have left this session." />
+      </Shell>
+    );
+  }
 
   return (
-    <div className="h-dvh w-full bg-zinc-950 text-white flex flex-col">
-      <div className="flex-1 min-h-0 p-3 flex flex-col gap-3">
-        {error && <p className="text-red-400 text-xs shrink-0">{error}</p>}
+    <div className="flex h-dvh w-full flex-col bg-[#09090b] text-zinc-100">
+      <TopBar
+        role={role}
+        mode={mode}
+        phase={phase}
+        sharing={sharing}
+        watching={publishers}
+        selfName={session?.name || claims.name}
+      />
 
-        {hasStage && (
-          <div className="flex-1 min-h-0 grid gap-3 grid-cols-1">
-            {sharingScreen && (
-              <Tile label="Your screen" accent>
-                <video ref={localScreenRef} autoPlay muted playsInline className="h-full w-full object-contain" />
-              </Tile>
-            )}
-            {screenTiles.map((tile) => (
-              <RemoteVideo
-                key={tile.producerId}
-                stream={tile.stream}
-                consumerId={tile.consumerId}
-                label={`${nameFor(tile.peerId)} — screen`}
-                accent
-                contain
-                requestKeyFrame={requestKeyFrame}
-              />
-            ))}
-          </div>
+      <div className="relative flex min-h-0 flex-1 flex-col gap-3 p-3">
+        {error && <ErrorBar message={error} onDismiss={() => setError(null)} />}
+
+        {/* ---- viewer ---- */}
+        {isViewer && (
+          <ViewerStage
+            phase={phase}
+            screenFeeds={screenFeeds}
+            cameraFeeds={cameraFeeds}
+            peerName={peerName}
+            publishers={publishers}
+            requestKeyFrame={requestKeyFrame}
+          />
         )}
 
-        <div
-          className={
-            hasStage
-              ? "shrink-0 h-28 flex gap-3 overflow-x-auto"
-              : "flex-1 min-h-0 grid gap-3 grid-cols-2 lg:grid-cols-3 auto-rows-fr"
-          }
-        >
-          <Tile label={`${self.name} (you)`} muted={!micOn} compact={hasStage}>
-            <video ref={localVideoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
-            {!cameraOn && (
-              <div className="absolute inset-0 grid place-items-center bg-zinc-900 text-xs text-zinc-400">
-                Camera off
-              </div>
-            )}
-          </Tile>
+        {/* ---- publisher ---- */}
+        {!isViewer && phase !== "live" && (
+          <PublisherLobby
+            mode={mode}
+            requireEntireScreen={requireEntireScreen}
+            busy={busy}
+            phase={phase}
+            onStart={startSession}
+          />
+        )}
 
-          {cameraTiles.map((tile) => (
-            <RemoteVideo
-              key={tile.producerId}
-              stream={tile.stream}
-              consumerId={tile.consumerId}
-              label={nameFor(tile.peerId)}
-              compact={hasStage}
-              requestKeyFrame={requestKeyFrame}
-            />
-          ))}
-        </div>
+        {!isViewer && phase === "live" && (
+          <PublisherStage
+            mode={mode}
+            sharing={sharing}
+            busy={busy}
+            requireEntireScreen={requireEntireScreen}
+            localScreenVideoRef={localScreenVideoRef}
+            localCameraVideoRef={localCameraVideoRef}
+            cameraOn={cameraOn}
+            hasCamera={hasCamera}
+            onStartShare={startScreenShare}
+            onEnableDevices={enableCameraAndMic}
+            screenFeeds={screenFeeds}
+            cameraFeeds={cameraFeeds}
+            peerName={peerName}
+            requestKeyFrame={requestKeyFrame}
+          />
+        )}
       </div>
 
-      <div className="shrink-0 flex items-center justify-between gap-3 border-t border-zinc-800 px-4 py-3">
-        <span className="text-xs text-zinc-500">
-          {peers.length + 1} participant{peers.length === 0 ? "" : "s"}
-        </span>
-        <div className="flex gap-2">
-          <ControlButton onClick={toggleMic} danger={!micOn}>
-            {micOn ? "Mute" : "Unmute"}
-          </ControlButton>
-          <ControlButton onClick={toggleCamera} danger={!cameraOn}>
-            {cameraOn ? "Stop video" : "Start video"}
-          </ControlButton>
-          <ControlButton onClick={sharingScreen ? stopScreenShare : startScreenShare} active={sharingScreen}>
-            {sharingScreen ? "Stop sharing" : "Share screen"}
-          </ControlButton>
-          <button
-            onClick={leave}
-            className="rounded bg-red-600 px-4 py-2 text-sm font-medium text-white hover:bg-red-500"
-          >
-            Leave
-          </button>
-        </div>
-      </div>
+      {phase === "live" && (
+        <ControlBar
+          isViewer={isViewer}
+          mode={mode}
+          sharing={sharing}
+          busy={busy}
+          micOn={micOn}
+          cameraOn={cameraOn}
+          hasMic={hasMic}
+          hasCamera={hasCamera}
+          participantCount={peers.length + 1}
+          onToggleShare={sharing ? () => stopScreenShare() : startScreenShare}
+          onToggleMic={toggleMic}
+          onToggleCamera={toggleCamera}
+          onLeave={leave}
+        />
+      )}
 
-      {audioTiles.map((tile) => (
-        <RemoteAudio key={tile.producerId} stream={tile.stream} />
+      {audioTracks.map((t) => (
+        <RemoteAudio key={t.producerId} stream={t.stream} />
       ))}
     </div>
   );
 }
 
-function ControlButton({ onClick, children, danger, active }) {
-  const tone = danger
-    ? "bg-red-600 text-white hover:bg-red-500"
-    : active
-      ? "bg-lime-600 text-white hover:bg-lime-500"
-      : "bg-zinc-800 text-zinc-100 hover:bg-zinc-700";
+/* ------------------------------------------------------------------ */
+/* presentational pieces                                               */
+/* ------------------------------------------------------------------ */
+
+function Shell({ children }) {
   return (
-    <button onClick={onClick} className={`rounded px-4 py-2 text-sm font-medium ${tone}`}>
+    <div className="grid h-dvh w-full place-items-center bg-[#09090b] p-6 text-zinc-100">
+      <div className="w-full max-w-sm">{children}</div>
+    </div>
+  );
+}
+
+function Notice({ title, body, tone = "neutral" }) {
+  const ring = tone === "warn" ? "ring-amber-500/30" : "ring-white/10";
+  return (
+    <div className={`rounded-xl bg-white/5 p-5 ring-1 ${ring}`}>
+      <h1 className="text-sm font-semibold">{title}</h1>
+      <p className="mt-1.5 text-sm leading-relaxed text-zinc-400">{body}</p>
+    </div>
+  );
+}
+
+function ErrorBar({ message, onDismiss }) {
+  return (
+    <div className="flex shrink-0 items-start gap-3 rounded-lg bg-red-500/10 px-3 py-2.5 ring-1 ring-red-500/25">
+      <p className="flex-1 text-[13px] leading-relaxed text-red-200">{message}</p>
+      <button
+        onClick={onDismiss}
+        className="rounded px-1.5 text-xs text-red-300/70 hover:text-red-200"
+        aria-label="Dismiss"
+      >
+        Dismiss
+      </button>
+    </div>
+  );
+}
+
+function TopBar({ role, mode, phase, sharing, watching, selfName }) {
+  const [elapsed, setElapsed] = useState(0);
+  useEffect(() => {
+    if (phase !== "live") return;
+    const started = Date.now();
+    const timer = setInterval(() => setElapsed(Math.floor((Date.now() - started) / 1000)), 1000);
+    return () => clearInterval(timer);
+  }, [phase]);
+
+  const mm = String(Math.floor(elapsed / 60)).padStart(2, "0");
+  const ss = String(elapsed % 60).padStart(2, "0");
+
+  let label;
+  if (role === "viewer") {
+    const names = watching.map((p) => p.name).filter(Boolean);
+    label = names.length ? `Viewing ${names.join(", ")}` : "Waiting for a participant";
+  } else if (mode === "screen") {
+    label = sharing ? "Your screen is being shared" : "Your screen is not being shared";
+  } else {
+    label = selfName ? `Joined as ${selfName}` : "Connected";
+  }
+
+  return (
+    <header className="flex shrink-0 items-center gap-3 border-b border-white/8 px-4 py-2.5">
+      <StatusDot phase={phase} sharing={sharing} role={role} />
+      <span className="truncate text-[13px] text-zinc-300">{label}</span>
+      {sharing && (
+        <span className="rounded-full bg-white/8 px-2 py-0.5 text-[11px] text-zinc-300">
+          {surfaceLabel(sharing.capture.displaySurface)}
+          {sharing.capture.width ? ` · ${sharing.capture.width}×${sharing.capture.height}` : ""}
+        </span>
+      )}
+      {phase === "live" && (
+        <span className="ml-auto font-mono text-[11px] tabular-nums text-zinc-500">
+          {mm}:{ss}
+        </span>
+      )}
+    </header>
+  );
+}
+
+function StatusDot({ phase, sharing, role }) {
+  const live = phase === "live" && (role === "viewer" || sharing);
+  const tone = phase !== "live" ? "bg-zinc-600" : live ? "bg-emerald-400" : "bg-amber-400";
+  return (
+    <span className="flex items-center gap-1.5">
+      <span className={`relative flex h-2 w-2 rounded-full ${tone}`}>
+        {live && (
+          <span className={`absolute inline-flex h-full w-full animate-ping rounded-full ${tone} opacity-60`} />
+        )}
+      </span>
+      <span className="text-[11px] font-medium uppercase tracking-wide text-zinc-500">
+        {phase === "live" ? (live ? "Live" : "Idle") : phase === "connecting" ? "Connecting" : "Offline"}
+      </span>
+    </span>
+  );
+}
+
+function PublisherLobby({ mode, requireEntireScreen, busy, phase, onStart }) {
+  const screenMode = mode === "screen";
+  return (
+    <div className="grid flex-1 place-items-center">
+      <div className="w-full max-w-md text-center">
+        <h1 className="text-lg font-semibold text-white">
+          {screenMode ? "Share your screen" : "Join this session"}
+        </h1>
+        <p className="mx-auto mt-2 max-w-sm text-[13px] leading-relaxed text-zinc-400">
+          {screenMode
+            ? requireEntireScreen
+              ? "You will be asked to pick a screen. Choose Entire Screen — a single window or browser tab will not be accepted."
+              : "You will be asked to choose what to share."
+            : "Your camera and microphone will be requested next."}
+        </p>
+        <button
+          onClick={onStart}
+          disabled={busy || phase === "connecting"}
+          className="mt-5 w-full rounded-lg bg-white px-4 py-2.5 text-sm font-medium text-zinc-900 transition hover:bg-zinc-200 disabled:opacity-40"
+        >
+          {phase === "connecting" ? "Connecting…" : "Continue"}
+        </button>
+      </div>
+    </div>
+  );
+}
+
+function PublisherStage({
+  mode,
+  sharing,
+  busy,
+  requireEntireScreen,
+  localScreenVideoRef,
+  localCameraVideoRef,
+  cameraOn,
+  hasCamera,
+  onStartShare,
+  onEnableDevices,
+  screenFeeds,
+  cameraFeeds,
+  peerName,
+  requestKeyFrame,
+}) {
+  const screenMode = mode === "screen";
+
+  if (screenMode && !sharing) {
+    return (
+      <div className="grid flex-1 place-items-center rounded-xl bg-white/[0.02] ring-1 ring-white/8">
+        <div className="max-w-sm px-6 text-center">
+          <h2 className="text-sm font-semibold text-white">You are connected but not sharing</h2>
+          <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-400">
+            {requireEntireScreen
+              ? "Pick Entire Screen in the prompt. Windows and browser tabs are rejected."
+              : "Choose what you would like to share."}
+          </p>
+          <button
+            onClick={onStartShare}
+            disabled={busy}
+            className="mt-4 rounded-lg bg-white px-4 py-2 text-sm font-medium text-zinc-900 hover:bg-zinc-200 disabled:opacity-40"
+          >
+            {busy ? "Waiting for your choice…" : "Start sharing"}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      {sharing && (
+        <Frame label="Your screen" accent className="min-h-0 flex-1">
+          <video ref={localScreenVideoRef} autoPlay muted playsInline className="h-full w-full object-contain" />
+        </Frame>
+      )}
+
+      {screenFeeds.map((t) => (
+        <RemoteVideo
+          key={t.producerId}
+          track={t}
+          label={`${peerName(t.peerId)} — screen`}
+          accent
+          contain
+          className="min-h-0 flex-1"
+          requestKeyFrame={requestKeyFrame}
+        />
+      ))}
+
+      {(!screenMode || cameraFeeds.length > 0 || hasCamera) && (
+        <div className="flex h-28 shrink-0 gap-3 overflow-x-auto">
+          {hasCamera && (
+            <Frame label="You" compact>
+              <video ref={localCameraVideoRef} autoPlay muted playsInline className="h-full w-full object-cover" />
+              {!cameraOn && <Curtain>Camera off</Curtain>}
+            </Frame>
+          )}
+          {!hasCamera && !screenMode && (
+            <button
+              onClick={onEnableDevices}
+              className="h-full shrink-0 rounded-lg px-4 text-xs text-zinc-300 ring-1 ring-white/10 hover:bg-white/5"
+            >
+              Enable camera &amp; mic
+            </button>
+          )}
+          {cameraFeeds.map((t) => (
+            <RemoteVideo
+              key={t.producerId}
+              track={t}
+              label={peerName(t.peerId)}
+              compact
+              requestKeyFrame={requestKeyFrame}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ViewerStage({ phase, screenFeeds, cameraFeeds, peerName, publishers, requestKeyFrame }) {
+  if (phase !== "live") {
+    return (
+      <div className="grid flex-1 place-items-center">
+        <p className="text-sm text-zinc-500">Connecting to the session…</p>
+      </div>
+    );
+  }
+
+  if (screenFeeds.length === 0 && cameraFeeds.length === 0) {
+    const who = publishers.map((p) => p.name).filter(Boolean).join(", ");
+    return (
+      <div className="grid flex-1 place-items-center rounded-xl bg-white/[0.02] ring-1 ring-white/8">
+        <div className="max-w-sm px-6 text-center">
+          <div className="mx-auto mb-3 h-8 w-8 animate-pulse rounded-full bg-white/10" />
+          <h2 className="text-sm font-semibold text-white">
+            {publishers.length ? "Nothing is being shared yet" : "Nobody has joined yet"}
+          </h2>
+          <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-400">
+            {publishers.length
+              ? `${who} is connected but has not started sharing. This view updates automatically.`
+              : "This view updates automatically as soon as someone joins and starts sharing."}
+          </p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex min-h-0 flex-1 flex-col gap-3">
+      {screenFeeds.map((t) => (
+        <RemoteVideo
+          key={t.producerId}
+          track={t}
+          label={`${peerName(t.peerId)} — screen`}
+          badge={t.displaySurface ? surfaceLabel(t.displaySurface) : null}
+          accent
+          contain
+          className="min-h-0 flex-1"
+          requestKeyFrame={requestKeyFrame}
+        />
+      ))}
+      {cameraFeeds.length > 0 && (
+        <div className={screenFeeds.length ? "flex h-28 shrink-0 gap-3 overflow-x-auto" : "grid min-h-0 flex-1 grid-cols-2 gap-3"}>
+          {cameraFeeds.map((t) => (
+            <RemoteVideo
+              key={t.producerId}
+              track={t}
+              label={peerName(t.peerId)}
+              compact={screenFeeds.length > 0}
+              requestKeyFrame={requestKeyFrame}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function ControlBar({
+  isViewer,
+  mode,
+  sharing,
+  busy,
+  micOn,
+  cameraOn,
+  hasMic,
+  hasCamera,
+  participantCount,
+  onToggleShare,
+  onToggleMic,
+  onToggleCamera,
+  onLeave,
+}) {
+  return (
+    <div className="flex shrink-0 items-center gap-3 border-t border-white/8 px-4 py-3">
+      <span className="text-[11px] text-zinc-500">
+        {participantCount} connected
+      </span>
+      <div className="ml-auto flex items-center gap-2">
+        {!isViewer && (
+          <Button onClick={onToggleShare} disabled={busy} tone={sharing ? "active" : "default"}>
+            {sharing ? "Stop sharing" : "Share screen"}
+          </Button>
+        )}
+        {!isViewer && mode !== "screen" && hasMic && (
+          <Button onClick={onToggleMic} tone={micOn ? "default" : "danger"}>
+            {micOn ? "Mute" : "Unmute"}
+          </Button>
+        )}
+        {!isViewer && mode !== "screen" && hasCamera && (
+          <Button onClick={onToggleCamera} tone={cameraOn ? "default" : "danger"}>
+            {cameraOn ? "Stop video" : "Start video"}
+          </Button>
+        )}
+        <Button onClick={onLeave} tone="danger">
+          {isViewer ? "Close" : "Leave"}
+        </Button>
+      </div>
+    </div>
+  );
+}
+
+function Button({ onClick, disabled, tone = "default", children }) {
+  const tones = {
+    default: "bg-white/8 text-zinc-100 hover:bg-white/12",
+    active: "bg-emerald-500/90 text-white hover:bg-emerald-500",
+    danger: "bg-red-500/90 text-white hover:bg-red-500",
+  };
+  return (
+    <button
+      onClick={onClick}
+      disabled={disabled}
+      className={`rounded-lg px-3.5 py-2 text-[13px] font-medium transition disabled:opacity-40 ${tones[tone]}`}
+    >
       {children}
     </button>
   );
 }
 
-function Tile({ children, label, accent, muted, compact }) {
+function Frame({ children, label, badge, accent, compact, className = "" }) {
   return (
     <div
-      className={`relative overflow-hidden rounded-lg bg-black ${
-        accent ? "border border-lime-500" : "border border-zinc-800"
-      } ${compact ? "h-full aspect-video shrink-0" : "h-full w-full"}`}
+      className={`relative overflow-hidden rounded-xl bg-black ring-1 ${
+        accent ? "ring-emerald-500/40" : "ring-white/10"
+      } ${compact ? "aspect-video h-full shrink-0" : ""} ${className}`}
     >
       {children}
-      <span className="absolute bottom-1 left-1 rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white">
-        {label}
-      </span>
-      {muted && (
-        <span className="absolute top-1 right-1 rounded bg-red-600 px-1.5 py-0.5 text-[10px] text-white">
-          Muted
+      <div className="pointer-events-none absolute bottom-2 left-2 flex items-center gap-1.5">
+        <span className="rounded bg-black/70 px-1.5 py-0.5 text-[10px] text-white backdrop-blur-sm">
+          {label}
         </span>
-      )}
+        {badge && (
+          <span className="rounded bg-emerald-500/85 px-1.5 py-0.5 text-[10px] font-medium text-white">
+            {badge}
+          </span>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function Curtain({ children }) {
+  return (
+    <div className="absolute inset-0 grid place-items-center bg-zinc-900/90 text-xs text-zinc-400">
+      {children}
     </div>
   );
 }
@@ -730,7 +792,7 @@ function RemoteAudio({ stream }) {
   return <audio ref={ref} autoPlay playsInline className="hidden" />;
 }
 
-function RemoteVideo({ stream, consumerId, label, accent, compact, contain, requestKeyFrame }) {
+function RemoteVideo({ track, label, badge, accent, compact, contain, className, requestKeyFrame }) {
   const ref = useRef(null);
   const [blocked, setBlocked] = useState(false);
 
@@ -738,17 +800,17 @@ function RemoteVideo({ stream, consumerId, label, accent, compact, contain, requ
     const video = ref.current;
     if (!video) return;
 
-    // Remote audio plays through separate <RemoteAudio> elements, so these
-    // elements are video-only and safe to mute — and muting is what keeps
-    // Chrome's autoplay policy from rejecting play() outright.
+    // Remote audio plays through separate <audio> elements, so these are
+    // video-only and safe to mute — which is also what stops Chrome's autoplay
+    // policy from rejecting play().
     video.muted = true;
-    video.srcObject = stream;
+    video.srcObject = track.stream;
     video.play().catch(() => setBlocked(true));
 
-    // A consumer created paused only receives delta frames once resumed, and a
-    // static screen share may not emit a keyframe on its own for minutes. Poll
-    // videoWidth (the only reliable proof frames decoded — play() can stay
-    // pending forever) and nudge the SFU for a keyframe until something lands.
+    // A consumer created paused only receives deltas once resumed, and a static
+    // screen can go minutes without emitting a keyframe. videoWidth is the only
+    // reliable proof frames decoded — play() can stay pending forever — so poll
+    // it and nudge the SFU until something lands.
     let tries = 0;
     const timer = setInterval(() => {
       const v = ref.current;
@@ -762,16 +824,14 @@ function RemoteVideo({ stream, consumerId, label, accent, compact, contain, requ
         clearInterval(timer);
         return;
       }
-      requestKeyFrame(consumerId);
+      requestKeyFrame(track.consumerId);
       v.play().catch(() => {});
     }, 1500);
 
     return () => clearInterval(timer);
-  }, [stream, consumerId, requestKeyFrame]);
+  }, [track.stream, track.consumerId, requestKeyFrame]);
 
-  function forcePlay() {
-    ref.current?.play().then(() => setBlocked(false)).catch(() => {});
-  }
+  const forcePlay = () => ref.current?.play().then(() => setBlocked(false)).catch(() => {});
 
   useEffect(() => {
     if (!blocked) return;
@@ -780,7 +840,7 @@ function RemoteVideo({ stream, consumerId, label, accent, compact, contain, requ
   }, [blocked]);
 
   return (
-    <Tile label={label} accent={accent} compact={compact}>
+    <Frame label={label} badge={badge} accent={accent} compact={compact} className={className}>
       <video
         ref={ref}
         autoPlay
@@ -789,13 +849,10 @@ function RemoteVideo({ stream, consumerId, label, accent, compact, contain, requ
         className={`h-full w-full ${contain ? "object-contain" : "object-cover"}`}
       />
       {blocked && (
-        <button
-          onClick={forcePlay}
-          className="absolute inset-0 grid place-items-center bg-black/70 text-sm text-white"
-        >
+        <button onClick={forcePlay} className="absolute inset-0 grid place-items-center bg-black/70 text-sm">
           Click to play
         </button>
       )}
-    </Tile>
+    </Frame>
   );
 }

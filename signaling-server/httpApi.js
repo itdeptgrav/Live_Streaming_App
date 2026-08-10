@@ -91,6 +91,38 @@ function requireApiKey(req, res) {
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 
 /**
+ * Flattens a live peer into the shape the API exposes. `sharing` is the part
+ * a monitoring dashboard actually cares about: whether a screen is live right
+ * now and, for screen tracks, which surface the user picked.
+ */
+function describePeer([peerId, peer]) {
+  const producers = [...peer.producers.values()];
+  const screen = producers.find((p) => p.appData?.source === "screen");
+  return {
+    peerId,
+    identity: peer.identity,
+    name: peer.displayName,
+    role: peer.canPublish === false ? "viewer" : "publisher",
+    joinedAt: peer.joinedAt,
+    sharing: {
+      screen: screen
+        ? {
+            displaySurface: screen.appData.displaySurface || null,
+            width: screen.appData.width || null,
+            height: screen.appData.height || null,
+            startedAt: screen.appData.startedAt || null,
+          }
+        : null,
+      camera: producers.some((p) => p.appData?.source === "camera"),
+      mic: producers.some((p) => p.appData?.source === "mic"),
+    },
+    // Live on/off state, which is separate from whether a track exists: a
+    // muted mic still has a producer.
+    media: peer.mediaState || { mic: false, camera: false, screen: Boolean(screen) },
+  };
+}
+
+/**
  * Handles a request if it matches a known route.
  * Returns true when handled, false to let the caller 404.
  */
@@ -164,7 +196,8 @@ export async function handleApiRequest(req, res, { publicUrl }) {
     if (!user) return true;
     const rooms = listRoomsForUser(user.id).map((r) => {
       const liveRoom = getMeetRoom(r.roomId);
-      return { ...r, live: Boolean(liveRoom), participantCount: liveRoom ? liveRoom.peers.size : 0 };
+      const count = liveRoom ? liveRoom.peers.size : 0;
+      return { ...r, live: count > 0, participantCount: count };
     });
     return json(res, 200, { rooms }), true;
   }
@@ -178,17 +211,46 @@ export async function handleApiRequest(req, res, { publicUrl }) {
     if (method === "GET") {
       const rooms = listRoomsForUser(user.id).map((r) => {
         const liveRoom = getMeetRoom(r.roomId);
-        return { ...r, live: Boolean(liveRoom), participantCount: liveRoom ? liveRoom.peers.size : 0 };
+        const count = liveRoom ? liveRoom.peers.size : 0;
+        return { ...r, live: count > 0, participantCount: count };
       });
       return json(res, 200, { rooms }), true;
     }
 
-    const { name, maxParticipants } = await readJsonBody(req);
+    const body = await readJsonBody(req);
+    const { name, maxParticipants } = body;
+
+    const mode = body.mode || "meeting";
+    if (!["meeting", "screen"].includes(mode))
+      return json(res, 400, { error: 'mode must be "meeting" or "screen"' }), true;
+
+    // Defaults to true for screen rooms: the point of a monitoring session is
+    // the whole display, and a caller who wanted otherwise can opt out.
+    const requireEntireScreen =
+      body.requireEntireScreen !== undefined
+        ? Boolean(body.requireEntireScreen)
+        : mode === "screen";
+
     const cap = Math.min(Number(maxParticipants) || MAX_MEET_PARTICIPANTS, MAX_MEET_PARTICIPANTS);
     const roomId = generateRoomId();
-    createMeetRoomRecord(roomId, { maxParticipants: cap, ownerUserId: user.id });
-    recordRoom({ roomId, userId: user.id, name, maxParticipants: cap });
-    return json(res, 201, { roomId, name: name || null, maxParticipants: cap, url: publicUrl }), true;
+    createMeetRoomRecord(roomId, {
+      maxParticipants: cap,
+      ownerUserId: user.id,
+      mode,
+      requireEntireScreen,
+    });
+    recordRoom({ roomId, userId: user.id, name, maxParticipants: cap, mode, requireEntireScreen });
+    return (
+      json(res, 201, {
+        roomId,
+        name: name || null,
+        mode,
+        requireEntireScreen,
+        maxParticipants: cap,
+        url: publicUrl,
+      }),
+      true
+    );
   }
 
   const roomMatch = p.match(/^\/api\/v1\/rooms\/([\w-]+)$/);
@@ -205,15 +267,11 @@ export async function handleApiRequest(req, res, { publicUrl }) {
         json(res, 200, {
           roomId,
           name: owner.name,
-          live: Boolean(live),
+          mode: owner.mode || "meeting",
+          requireEntireScreen: Boolean(owner.require_entire_screen),
+          live: Boolean(live && live.peers.size > 0),
           participantCount: live ? live.peers.size : 0,
-          participants: live
-            ? [...live.peers.entries()].map(([peerId, peer]) => ({
-                peerId,
-                identity: peer.identity,
-                name: peer.displayName,
-              }))
-            : [],
+          participants: live ? [...live.peers.entries()].map(describePeer) : [],
           endedAt: owner.ended_at,
         }),
         true
@@ -239,16 +297,36 @@ export async function handleApiRequest(req, res, { publicUrl }) {
     if (!String(body.identity || "").trim())
       return json(res, 400, { error: "identity is required" }), true;
 
+    const role = body.role || (body.canPublish === false ? "viewer" : "publisher");
+    if (!["publisher", "viewer"].includes(role))
+      return json(res, 400, { error: 'role must be "publisher" or "viewer"' }), true;
+
+    // `role` is the ergonomic knob; canPublish stays the wire-level truth the
+    // SFU enforces. An explicit canPublish still wins so older callers work.
+    const canPublish = body.canPublish !== undefined ? body.canPublish !== false : role === "publisher";
+
     const token = createRoomToken({
       roomId,
       identity: String(body.identity).trim(),
       name: String(body.name || body.identity).trim(),
-      canPublish: body.canPublish !== false,
+      canPublish,
       canSubscribe: body.canSubscribe !== false,
       ttlSeconds: Math.min(Number(body.ttlSeconds) || 6 * 60 * 60, 24 * 60 * 60),
       userId: user.id,
+      role,
+      mode: owner.mode || "meeting",
+      requireEntireScreen: Boolean(owner.require_entire_screen),
     });
-    return json(res, 200, { token, url: publicUrl, roomId }), true;
+    return (
+      json(res, 200, {
+        token,
+        url: publicUrl,
+        roomId,
+        role,
+        mode: owner.mode || "meeting",
+      }),
+      true
+    );
   }
 
   if (method === "GET" && p === "/api/v1/usage") {

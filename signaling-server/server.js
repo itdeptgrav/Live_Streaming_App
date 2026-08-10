@@ -4,6 +4,7 @@ import { randomUUID } from "crypto";
 import { isKnownRoom, MAX_VIEWERS_PER_ROOM, ROOMS } from "./rooms.js";
 import {
   getMeetRoom,
+  createMeetRoomRecord,
   ensureRouter,
   roomIsFull,
   createWebRtcTransport,
@@ -11,7 +12,7 @@ import {
 } from "./meetRooms.js";
 import { reconcileOpenSessions } from "./db.js";
 import { verifyRoomToken } from "./auth.js";
-import { openUsageSession, closeUsageSession } from "./platformStore.js";
+import { openUsageSession, closeUsageSession, getRoomOwner } from "./platformStore.js";
 import { handleApiRequest } from "./httpApi.js";
 
 const PORT = process.env.PORT || 4000;
@@ -222,7 +223,7 @@ function handleMonitorMessage(ws, msg) {
 async function handleMeetMessage(ws, msg) {
   switch (msg.type) {
     case "meet-join": {
-      const room = getMeetRoom(msg.roomId);
+      const room = getMeetRoom(msg.roomId) || rehydrateRoom(msg.roomId);
       if (!room) {
         send(ws, { type: "error", rid: msg.rid, message: "Room does not exist" });
         return;
@@ -258,6 +259,8 @@ async function handleMeetMessage(ws, msg) {
         identity,
         displayName,
         canPublish: claims ? claims.canPublish !== false : true,
+        joinedAt: Date.now(),
+        mediaState: { mic: false, camera: false, screen: false },
         transports: new Map(),
         producers: new Map(),
         consumers: new Map(),
@@ -280,13 +283,22 @@ async function handleMeetMessage(ws, msg) {
       const existingPeers = [];
       for (const [otherId, peer] of room.peers) {
         if (otherId === peerId) continue;
-        existingPeers.push({ peerId: otherId, identity: peer.identity, name: peer.displayName });
+        existingPeers.push({
+          peerId: otherId,
+          identity: peer.identity,
+          name: peer.displayName,
+          role: peer.canPublish === false ? "viewer" : "publisher",
+          media: peer.mediaState,
+        });
         for (const producer of peer.producers.values()) {
           existingProducers.push({
             producerId: producer.id,
             peerId: otherId,
             kind: producer.kind,
             source: producer.appData?.source || (producer.kind === "audio" ? "mic" : "camera"),
+            displaySurface: producer.appData?.displaySurface || null,
+            width: producer.appData?.width || null,
+            height: producer.appData?.height || null,
           });
         }
       }
@@ -296,6 +308,12 @@ async function handleMeetMessage(ws, msg) {
         peerId,
         identity,
         displayName,
+        // Echoed back so the client renders from server truth rather than from
+        // a token it decoded itself.
+        role: claims?.role || (claims?.canPublish === false ? "viewer" : "publisher"),
+        canPublish: claims ? claims.canPublish !== false : true,
+        mode: room.mode || "meeting",
+        requireEntireScreen: Boolean(room.requireEntireScreen),
         rtpCapabilities: router.rtpCapabilities,
         existingProducers,
         existingPeers,
@@ -346,26 +364,88 @@ async function handleMeetMessage(ws, msg) {
         send(ws, { type: "error", rid: msg.rid, message: "This token does not grant publish permission" });
         return;
       }
-      const transport = peer.transports.get(msg.transportId);
-      if (!transport) return;
+      const source = msg.source || (msg.kind === "audio" ? "mic" : "camera");
 
- const producer = await transport.produce({
+      // Policy is checked before anything is created. A tampered client that
+      // claims "monitor" while sharing one tab is the whole threat model for a
+      // monitoring product, so the claim is validated here rather than trusted
+      // because the browser was asked nicely.
+      if (source === "screen" && room.requireEntireScreen && msg.displaySurface !== "monitor") {
+        send(ws, {
+          type: "error",
+          rid: msg.rid,
+          code: "ENTIRE_SCREEN_REQUIRED",
+          message:
+            "This room requires sharing your entire screen. " +
+            `You selected "${msg.displaySurface || "an unreported surface"}".`,
+        });
+        return;
+      }
+
+      const transport = peer.transports.get(msg.transportId);
+      if (!transport) {
+        // Returning silently here used to leave the client waiting on a reply
+        // that never came, until its request timed out with no explanation.
+        send(ws, {
+          type: "error",
+          rid: msg.rid,
+          code: "UNKNOWN_TRANSPORT",
+          message: "No such send transport — reconnect and try again.",
+        });
+        return;
+      }
+
+      const producer = await transport.produce({
         kind: msg.kind,
         rtpParameters: msg.rtpParameters,
-        appData: { source: msg.source || (msg.kind === "audio" ? "mic" : "camera") },
-      });      peer.producers.set(producer.id, producer);
-      console.log(`[meet] peer ${ws.meta.peerId} produced ${producer.kind} producer ${producer.id}`);
+        appData: {
+          source,
+          displaySurface: msg.displaySurface || null,
+          width: msg.width || null,
+          height: msg.height || null,
+          startedAt: Date.now(),
+        },
+      });
+      peer.producers.set(producer.id, producer);
+      console.log(
+        `[meet] peer ${ws.meta.peerId} produced ${producer.kind}/${source}` +
+          (source === "screen" ? ` surface=${msg.displaySurface} ${msg.width}x${msg.height}` : "")
+      );
 
       send(ws, { type: "meet-produced", rid: msg.rid, producerId: producer.id });
 
       for (const [otherId, otherPeer] of room.peers) {
         if (otherId === ws.meta.peerId) continue;
-       send(otherPeer.ws, {
+        send(otherPeer.ws, {
           type: "meet-new-producer",
           producerId: producer.id,
           peerId: ws.meta.peerId,
           kind: producer.kind,
           source: producer.appData.source,
+          displaySurface: producer.appData.displaySurface,
+          width: producer.appData.width,
+          height: producer.appData.height,
+        });
+      }
+      break;
+    }
+
+    // Mic/camera on-off state. A muted mic keeps its producer, so this is the
+    // only way a watcher learns the difference between "no device" and "muted".
+    case "meet-media-state": {
+      const { room, peer } = currentMeetPeer(ws);
+      if (!room || !peer) return;
+      peer.mediaState = {
+        mic: Boolean(msg.mic),
+        camera: Boolean(msg.camera),
+        screen: Boolean(msg.screen),
+      };
+      for (const [otherId, otherPeer] of room.peers) {
+        if (otherId === ws.meta.peerId) continue;
+        send(otherPeer.ws, {
+          type: "meet-media-state",
+          peerId: ws.meta.peerId,
+          ...peer.mediaState,
         });
       }
       break;
@@ -498,6 +578,27 @@ function currentMeetPeer(ws) {
   const room = getMeetRoom(ws.meta.roomId);
   const peer = room?.peers.get(ws.meta.peerId);
   return { room, peer };
+}
+
+/**
+ * Rebuilds the in-memory room for an API-created room that has no live peers.
+ *
+ * Live rooms are dropped as soon as the last peer leaves (and all of them are
+ * lost on restart), which is fine for a one-off call but wrong for a durable
+ * room: a watcher who opens the page before anyone joins, or anyone who
+ * reconnects, would be told the room does not exist while the API happily
+ * reports it. Rooms the customer explicitly ended stay gone.
+ */
+function rehydrateRoom(roomId) {
+  const record = getRoomOwner(roomId);
+  if (!record || record.ended_at) return null;
+  console.log(`[meet] rehydrating room ${roomId} from the database`);
+  return createMeetRoomRecord(roomId, {
+    maxParticipants: record.max_participants,
+    ownerUserId: record.user_id,
+    mode: record.mode || "meeting",
+    requireEntireScreen: Boolean(record.require_entire_screen),
+  });
 }
 
 /** Which peer owns a producer — lets clients attribute a track to a participant. */

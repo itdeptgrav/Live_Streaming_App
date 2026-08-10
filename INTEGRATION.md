@@ -1,10 +1,31 @@
 # Grav Stream — integration guide
 
-Self-hosted video meetings. Your backend talks to a REST API; your frontend
-embeds an iframe. There is no SDK to install and no WebRTC code to write.
+Self-hosted screen sharing and video. Your backend talks to a REST API; your
+frontend embeds an iframe. There is no SDK to install and no WebRTC code to
+write.
 
 - **API + signaling:** `https://stream.grav.in` (droplet, mediasoup SFU)
 - **Dashboard + embed UI:** `https://live.grav.in`
+
+## Two room modes
+
+| Mode | Use it for | What the embed does |
+| --- | --- | --- |
+| `screen` | Screen monitoring: one person shares, others watch | Publisher gets a screen picker; camera and mic are never requested |
+| `meeting` | Round-table calls | Publisher gets camera + mic, and can also share a screen |
+
+## Two participant roles
+
+Roles are set per token, so one room serves both sides.
+
+| Role | Can publish | Devices requested | Typical user |
+| --- | --- | --- | --- |
+| `publisher` | Yes | Screen (and camera/mic in meeting mode) | The employee sharing |
+| `viewer` | **No** | **None** — no camera or microphone prompt at all | The manager watching |
+
+A `viewer` joins automatically with no permission prompt. The SFU rejects any
+publish attempt from a viewer token, so this is an access control boundary,
+not a UI preference.
 
 ---
 
@@ -61,48 +82,87 @@ POST /api/v1/rooms
 Authorization: Bearer gsk_live_…
 Content-Type: application/json
 
-{ "name": "Daily standup", "maxParticipants": 12 }
+{ "name": "Alice - workstation", "mode": "screen", "requireEntireScreen": true, "maxParticipants": 12 }
 ```
 
 ```json
-{ "roomId": "c42ce8ff", "name": "Daily standup", "maxParticipants": 12, "url": "wss://stream.grav.in" }
+{
+  "roomId": "c42ce8ff",
+  "name": "Alice - workstation",
+  "mode": "screen",
+  "requireEntireScreen": true,
+  "maxParticipants": 12,
+  "url": "wss://stream.grav.in"
+}
 ```
 
-`maxParticipants` is clamped to the server ceiling (30).
+| Field | Default | Meaning |
+| --- | --- | --- |
+| `mode` | `"meeting"` | `"screen"` for monitoring, `"meeting"` for calls |
+| `requireEntireScreen` | `true` when `mode` is `screen` | Reject window and browser-tab shares |
+| `maxParticipants` | 30 | Clamped to the server ceiling (30) |
 
 ### Mint a room token
 
-One token per participant, per meeting. `identity` is your stable user id;
-`name` is what other participants see.
+One token per participant. `identity` is your stable user id; `name` is what
+others see.
 
 ```http
 POST /api/v1/rooms/c42ce8ff/tokens
 Authorization: Bearer gsk_live_…
 Content-Type: application/json
 
-{ "identity": "employee-42", "name": "Alice", "canPublish": true, "canSubscribe": true, "ttlSeconds": 21600 }
+{ "identity": "employee-42", "name": "Alice", "role": "publisher", "ttlSeconds": 21600 }
 ```
 
 ```json
-{ "token": "eyJhbGciOiJIUzI1NiIs…", "url": "wss://stream.grav.in", "roomId": "c42ce8ff" }
+{ "token": "eyJhbGciOiJIUzI1NiIs…", "url": "wss://stream.grav.in", "roomId": "c42ce8ff", "role": "publisher", "mode": "screen" }
 ```
 
-`ttlSeconds` defaults to 6 hours and is capped at 24. Set `canPublish: false`
-for view-only attendees — the server rejects their publish attempts, it is not
-merely a UI hint.
+Use `"role": "viewer"` for the watching manager. A viewer is never prompted for
+camera or microphone, and the SFU rejects any publish attempt from that token.
+
+`ttlSeconds` defaults to 6 hours, capped at 24.
 
 ### Room status
+
+This is the endpoint a monitoring dashboard polls. `sharing.screen` is present
+only while a screen is actually live, and reports which surface was chosen.
 
 ```json
 {
   "roomId": "c42ce8ff",
-  "name": "Daily standup",
+  "name": "Alice - workstation",
+  "mode": "screen",
+  "requireEntireScreen": true,
   "live": true,
-  "participantCount": 3,
-  "participants": [{ "peerId": "…", "identity": "employee-42", "name": "Alice" }],
+  "participantCount": 2,
+  "participants": [
+    {
+      "peerId": "…",
+      "identity": "employee-42",
+      "name": "Alice",
+      "role": "publisher",
+      "joinedAt": 1786353378689,
+      "sharing": {
+        "screen": { "displaySurface": "monitor", "width": 1920, "height": 1080, "startedAt": 1786353381020 },
+        "camera": false,
+        "mic": false
+      },
+      "media": { "mic": false, "camera": false, "screen": true }
+    }
+  ],
   "endedAt": null
 }
 ```
+
+`displaySurface` is the browser's own report of what the user picked:
+
+| Value | Meaning |
+| --- | --- |
+| `monitor` | An entire display |
+| `window` | A single application window |
+| `browser` | A single browser tab |
 
 ---
 
@@ -131,30 +191,56 @@ Optional query params:
 
 ```js
 window.addEventListener("message", (event) => {
+  if (event.origin !== "https://live.grav.in") return;   // always check this
   if (event.data?.source !== "grav-stream") return;
-  switch (event.data.type) {
-    case "ready":                 break; // iframe loaded
-    case "joined":                break; // { peerId, identity }
-    case "left":                  break; // user hung up
-    case "participants-changed":  break; // { count }
-    case "error":                 break; // { message }
-  }
+  const { type, ...data } = event.data;
+  // …
 });
 ```
 
-In production, also check `event.origin === "https://live.grav.in"` before
-trusting a message.
+| Event | Payload | Fires when |
+| --- | --- | --- |
+| `ready` | `{ roomId, role, mode }` | The embed has loaded. Exactly once. |
+| `joined` | `{ peerId, identity, role, mode }` | Connected to the room |
+| `screen-share-started` | `{ displaySurface, width, height, frameRate, label }` | The user began sharing — **this is where you learn what they picked** |
+| `screen-share-stopped` | `{}` | Sharing ended, including via the browser's own "Stop sharing" bar |
+| `screen-share-cancelled` | `{}` | The user dismissed the picker without choosing |
+| `media-state` | `{ mic, camera, screen }` | Any local device is toggled |
+| `remote-screen-started` | `{ peerId, displaySurface, width, height }` | Someone else started sharing (useful for viewers) |
+| `participant-joined` | `{ identity, name }` | Someone joined |
+| `participant-left` | `{ peerId }` | Someone left |
+| `left` | `{}` | The local user ended their session |
+| `error` | `{ message, code, capture? }` | Something failed — see codes below |
+
+#### Error codes
+
+| `code` | Meaning | What to tell the user |
+| --- | --- | --- |
+| `ENTIRE_SCREEN_REQUIRED` | They picked a window or tab in a room that demands a full display. `capture.displaySurface` says which. | "Share your entire screen, not a single window." |
+| `SURFACE_UNKNOWN` | The browser will not report the surface, so the policy cannot be verified. | "Use Chrome or Edge." |
+| `PERMISSION_DENIED` | Blocked by the browser, usually a missing iframe `allow`. | Check the `allow` attribute. |
+| `DEVICE_PERMISSION_DENIED` | Camera/mic unavailable in a meeting room. | Check the permission prompt. |
+| `SERVER_UNREACHABLE` | Could not reach the streaming server. | Retry / check status. |
+
+Enforcement is server-side: even if a client is tampered with, the SFU refuses
+a screen producer whose surface violates the room policy. The event exists so
+you can *explain* the rejection, not to implement it.
 
 ### Controlling the iframe
 
 ```js
 iframeEl.contentWindow.postMessage(
-  { source: "grav-stream-parent", type: "toggle-mic" },
+  { source: "grav-stream-parent", type: "start-screen-share" },
   "https://live.grav.in"
 );
 ```
 
-Supported types: `toggle-mic`, `toggle-camera`, `toggle-screen-share`, `leave`.
+Supported types: `start-screen-share`, `stop-screen-share`,
+`toggle-screen-share`, `toggle-mic`, `toggle-camera`, `leave`.
+
+> Browsers require a user gesture to open the screen picker. Calling
+> `start-screen-share` from your own button click works; calling it on a timer
+> or on page load will be blocked.
 
 ---
 

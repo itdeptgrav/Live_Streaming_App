@@ -33,7 +33,10 @@ export function generateRoomId() {
   return randomUUID().slice(0, 8);
 }
 
-export function createMeetRoomRecord(roomId, { maxParticipants, ownerUserId = null } = {}) {
+export function createMeetRoomRecord(
+  roomId,
+  { maxParticipants, ownerUserId = null, mode = "meeting", requireEntireScreen = false } = {}
+) {
   meetRooms.set(roomId, {
     id: roomId,
     createdAt: Date.now(),
@@ -41,6 +44,8 @@ export function createMeetRoomRecord(roomId, { maxParticipants, ownerUserId = nu
     peers: new Map(),
     maxParticipants: maxParticipants || MAX_MEET_PARTICIPANTS,
     ownerUserId,
+    mode,
+    requireEntireScreen,
   });
   return meetRooms.get(roomId);
 }

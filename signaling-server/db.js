@@ -81,6 +81,22 @@ CREATE INDEX IF NOT EXISTS idx_usage_user_time ON usage_sessions(user_id, joined
 CREATE INDEX IF NOT EXISTS idx_usage_room ON usage_sessions(room_id);
 `);
 
+// Additive migrations. SQLite has no "ADD COLUMN IF NOT EXISTS", so each one
+// checks the live schema first. Keep them idempotent — this runs on every boot.
+function addColumnIfMissing(table, column, definition) {
+  const columns = db.prepare(`PRAGMA table_info(${table})`).all();
+  if (columns.some((c) => c.name === column)) return;
+  db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${definition}`);
+  console.log(`[db] migrated: ${table}.${column}`);
+}
+
+// A room is either a screen-monitoring session or a round-table meeting. The
+// mode changes what the embed asks the browser for, so it is stored per room
+// and copied into every token minted for it.
+addColumnIfMissing("rooms", "mode", "TEXT NOT NULL DEFAULT 'meeting'");
+// When set, publishers must share a whole display — not a window or a tab.
+addColumnIfMissing("rooms", "require_entire_screen", "INTEGER NOT NULL DEFAULT 0");
+
 // A hard restart leaves peer rows with left_at NULL and nobody to close them.
 // Closing them at boot means "still connected" only ever describes live peers.
 export function reconcileOpenSessions() {

@@ -115,7 +115,18 @@ function sign(data) {
  * Mints a room token. This is what a customer's backend hands to their end
  * user; the browser presents it on meet-join and never sees the API key.
  */
-export function createRoomToken({ roomId, identity, name, canPublish = true, canSubscribe = true, ttlSeconds = 6 * 60 * 60, userId }) {
+export function createRoomToken({
+  roomId,
+  identity,
+  name,
+  canPublish = true,
+  canSubscribe = true,
+  ttlSeconds = 6 * 60 * 60,
+  userId,
+  role = "publisher",
+  mode = "meeting",
+  requireEntireScreen = false,
+}) {
   const now = Math.floor(Date.now() / 1000);
   const header = b64url(JSON.stringify({ alg: "HS256", typ: "JWT" }));
   const payload = b64url(
@@ -126,6 +137,12 @@ export function createRoomToken({ roomId, identity, name, canPublish = true, can
       owner: userId,
       canPublish,
       canSubscribe,
+      // The embed reads these to pick its UI before it connects: a viewer must
+      // never be asked for camera/mic, and a screen-mode publisher gets the
+      // share-your-screen flow rather than a meeting lobby.
+      role,
+      mode,
+      requireEntireScreen,
       iat: now,
       exp: now + ttlSeconds,
     })

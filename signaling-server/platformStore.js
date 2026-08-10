@@ -67,15 +67,28 @@ export function revokeApiKey(userId, keyId) {
 
 // ---------------- rooms ----------------
 
-export function recordRoom({ roomId, userId, name, maxParticipants }) {
+export function recordRoom({ roomId, userId, name, maxParticipants, mode, requireEntireScreen }) {
   db.prepare(
-    `INSERT INTO rooms (room_id, user_id, name, max_participants, created_at)
-     VALUES (?, ?, ?, ?, ?)`
-  ).run(roomId, userId, name || null, maxParticipants, Date.now());
+    `INSERT INTO rooms (room_id, user_id, name, max_participants, created_at, mode, require_entire_screen)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    roomId,
+    userId,
+    name || null,
+    maxParticipants,
+    Date.now(),
+    mode || "meeting",
+    requireEntireScreen ? 1 : 0
+  );
 }
 
 export function getRoomOwner(roomId) {
-  return db.prepare("SELECT user_id, name, ended_at FROM rooms WHERE room_id = ?").get(roomId);
+  return db
+    .prepare(
+      `SELECT user_id, name, ended_at, mode, require_entire_screen, max_participants
+         FROM rooms WHERE room_id = ?`
+    )
+    .get(roomId);
 }
 
 export function markRoomEnded(roomId) {
