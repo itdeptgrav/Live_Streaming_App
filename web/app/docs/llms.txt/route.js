@@ -392,6 +392,14 @@ export async function GET() {
   return new Response(DOC, {
     headers: {
       "Content-Type": "text/plain; charset=utf-8",
+      // The document contains a literal <script> tag in the SDK example, and
+      // content-rewriting browser extensions have been seen treating this file
+      // as HTML and injecting their own payload right after it — turning a
+      // 17 KB reference into a 900 KB mess. nosniff plus an explicit
+      // attachment disposition tell the browser this is an opaque download,
+      // not a document to parse.
+      "X-Content-Type-Options": "nosniff",
+      "Content-Disposition": 'attachment; filename="grav-stream-docs.txt"',
       "Cache-Control": "public, max-age=3600",
     },
   });
