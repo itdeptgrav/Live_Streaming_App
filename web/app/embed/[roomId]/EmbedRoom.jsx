@@ -17,7 +17,11 @@ import { useRoomConnection } from "./useRoomConnection";
 const CHANNEL = "grav-stream";
 const PARENT_CHANNEL = "grav-stream-parent";
 
-export default function EmbedRoom({ roomId, token, parentOrigin = "*" }) {
+export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }) {
+  const ui = options || {
+    header: true, controls: true, participants: true, timer: true,
+    selfPreview: false, theme: "dark", accent: "#34d399", startLabel: null,
+  };
   const claims = useMemo(() => readRoomTokenClaims(token), [token]);
 
   const originRef = useRef(parentOrigin);
@@ -169,7 +173,11 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*" }) {
       }
 
       setSharing({ capture });
-      emit("screen-share-started", { ...capture });
+      // isEntireScreen saves every integrator from re-deriving the same check.
+      emit("screen-share-started", {
+        ...capture,
+        isEntireScreen: capture.displaySurface === "monitor",
+      });
 
       // The browser's own "Stop sharing" bar ends the track without telling us.
       track.onended = () => stopScreenShare();
@@ -352,16 +360,27 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*" }) {
     );
   }
 
+  const light = ui.theme === "light";
+
   return (
-    <div className="flex h-dvh w-full flex-col bg-[#09090b] text-zinc-100">
-      <TopBar
-        role={role}
-        mode={mode}
-        phase={phase}
-        sharing={sharing}
-        watching={publishers}
-        selfName={session?.name || claims.name}
-      />
+    <div
+      style={{ "--accent": ui.accent }}
+      className={`flex h-dvh w-full flex-col ${
+        light ? "bg-white text-zinc-900" : "bg-[#09090b] text-zinc-100"
+      }`}
+    >
+      {ui.header && (
+        <TopBar
+          role={role}
+          mode={mode}
+          phase={phase}
+          sharing={sharing}
+          watching={publishers}
+          selfName={session?.name || claims.name}
+          showTimer={ui.timer}
+          light={light}
+        />
+      )}
 
       <div className="relative flex min-h-0 flex-1 flex-col gap-3 p-3">
         {error && <ErrorBar message={error} onDismiss={() => setError(null)} />}
@@ -386,6 +405,7 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*" }) {
             busy={busy}
             phase={phase}
             onStart={startSession}
+            startLabel={ui.startLabel}
           />
         )}
 
@@ -405,13 +425,17 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*" }) {
             cameraFeeds={cameraFeeds}
             peerName={peerName}
             requestKeyFrame={requestKeyFrame}
+            selfPreview={ui.selfPreview}
+            startLabel={ui.startLabel}
           />
         )}
       </div>
 
-      {phase === "live" && (
+      {phase === "live" && ui.controls && (
         <ControlBar
           isViewer={isViewer}
+          light={light}
+          showParticipants={ui.participants}
           mode={mode}
           sharing={sharing}
           busy={busy}
@@ -471,7 +495,7 @@ function ErrorBar({ message, onDismiss }) {
   );
 }
 
-function TopBar({ role, mode, phase, sharing, watching, selfName }) {
+function TopBar({ role, mode, phase, sharing, watching, selfName, showTimer = true, light = false }) {
   const [elapsed, setElapsed] = useState(0);
   useEffect(() => {
     if (phase !== "live") return;
@@ -494,7 +518,11 @@ function TopBar({ role, mode, phase, sharing, watching, selfName }) {
   }
 
   return (
-    <header className="flex shrink-0 items-center gap-3 border-b border-white/8 px-4 py-2.5">
+    <header
+      className={`flex shrink-0 items-center gap-3 border-b px-4 py-2.5 ${
+        light ? "border-zinc-950/10" : "border-white/8"
+      }`}
+    >
       <StatusDot phase={phase} sharing={sharing} role={role} />
       <span className="truncate text-[13px] text-zinc-300">{label}</span>
       {sharing && (
@@ -503,7 +531,7 @@ function TopBar({ role, mode, phase, sharing, watching, selfName }) {
           {sharing.capture.width ? ` · ${sharing.capture.width}×${sharing.capture.height}` : ""}
         </span>
       )}
-      {phase === "live" && (
+      {phase === "live" && showTimer && (
         <span className="ml-auto font-mono text-[11px] tabular-nums text-zinc-500">
           {mm}:{ss}
         </span>
@@ -529,7 +557,7 @@ function StatusDot({ phase, sharing, role }) {
   );
 }
 
-function PublisherLobby({ mode, requireEntireScreen, busy, phase, onStart }) {
+function PublisherLobby({ mode, requireEntireScreen, busy, phase, onStart, startLabel }) {
   const screenMode = mode === "screen";
   return (
     <div className="grid flex-1 place-items-center">
@@ -540,8 +568,8 @@ function PublisherLobby({ mode, requireEntireScreen, busy, phase, onStart }) {
         <p className="mx-auto mt-2 max-w-sm text-[13px] leading-relaxed text-zinc-400">
           {screenMode
             ? requireEntireScreen
-              ? "You will be asked to pick a screen. Choose Entire Screen — a single window or browser tab will not be accepted."
-              : "You will be asked to choose what to share."
+              ? "You will be asked what to share. This session accepts a whole screen only."
+              : "You will be asked what to share — a screen, a window, or a tab."
             : "Your camera and microphone will be requested next."}
         </p>
         <button
@@ -549,7 +577,7 @@ function PublisherLobby({ mode, requireEntireScreen, busy, phase, onStart }) {
           disabled={busy || phase === "connecting"}
           className="mt-5 w-full rounded-lg bg-white px-4 py-2.5 text-sm font-medium text-zinc-900 transition hover:bg-zinc-200 disabled:opacity-40"
         >
-          {phase === "connecting" ? "Connecting…" : "Continue"}
+          {phase === "connecting" ? "Connecting…" : startLabel || "Continue"}
         </button>
       </div>
     </div>
@@ -571,6 +599,8 @@ function PublisherStage({
   cameraFeeds,
   peerName,
   requestKeyFrame,
+  selfPreview = false,
+  startLabel,
 }) {
   const screenMode = mode === "screen";
 
@@ -581,15 +611,15 @@ function PublisherStage({
           <h2 className="text-sm font-semibold text-white">You are connected but not sharing</h2>
           <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-400">
             {requireEntireScreen
-              ? "Pick Entire Screen in the prompt. Windows and browser tabs are rejected."
-              : "Choose what you would like to share."}
+              ? "Choose a whole screen when the prompt appears — this session does not accept a single window or tab."
+              : "Choose a screen, a window, or a tab when the prompt appears."}
           </p>
           <button
             onClick={onStartShare}
             disabled={busy}
             className="mt-4 rounded-lg bg-white px-4 py-2 text-sm font-medium text-zinc-900 hover:bg-zinc-200 disabled:opacity-40"
           >
-            {busy ? "Waiting for your choice…" : "Start sharing"}
+            {busy ? "Waiting for your choice…" : startLabel || "Start sharing"}
           </button>
         </div>
       </div>
@@ -599,7 +629,9 @@ function PublisherStage({
   // While sharing a whole display, a live self-preview would show the screen
   // that contains the preview — an infinite mirror that also eats the space the
   // person is meant to be working in. Confirm the state in words instead.
-  if (screenMode && sharing) {
+  // Opt-in only: a preview of a whole display, shown on that display, is an
+  // infinite mirror. Hosts that share a window may still want it.
+  if (screenMode && sharing && !selfPreview) {
     return <SharingConfirmation capture={sharing.capture} />;
   }
 
@@ -740,6 +772,8 @@ function ViewerStage({ phase, screenFeeds, cameraFeeds, peerName, publishers, re
 
 function ControlBar({
   isViewer,
+  light = false,
+  showParticipants = true,
   mode,
   sharing,
   busy,
@@ -754,11 +788,15 @@ function ControlBar({
   onLeave,
 }) {
   return (
-    <div className="flex shrink-0 items-center gap-3 border-t border-white/8 px-4 py-3">
-      <span className="text-[11px] text-zinc-500">
-        {participantCount} connected
-      </span>
-      <div className="ml-auto flex items-center gap-2">
+    <div
+      className={`flex shrink-0 flex-wrap items-center gap-2 border-t px-4 py-3 ${
+        light ? "border-zinc-950/10" : "border-white/8"
+      }`}
+    >
+      {showParticipants && (
+        <span className="text-[11px] text-zinc-500">{participantCount} connected</span>
+      )}
+      <div className="ml-auto flex flex-wrap items-center gap-2">
         {!isViewer && (
           <Button onClick={onToggleShare} disabled={busy} tone={sharing ? "active" : "default"}>
             {sharing ? "Stop sharing" : "Share screen"}

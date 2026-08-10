@@ -224,12 +224,11 @@ export async function handleApiRequest(req, res, { publicUrl }) {
     if (!["meeting", "screen"].includes(mode))
       return json(res, 400, { error: 'mode must be "meeting" or "screen"' }), true;
 
-    // Defaults to true for screen rooms: the point of a monitoring session is
-    // the whole display, and a caller who wanted otherwise can opt out.
-    const requireEntireScreen =
-      body.requireEntireScreen !== undefined
-        ? Boolean(body.requireEntireScreen)
-        : mode === "screen";
+    // Off unless asked for. The platform's job is to report which surface was
+    // picked; deciding whether that is acceptable belongs to the product built
+    // on top, which knows its own policy. Opt in with requireEntireScreen: true
+    // to have the SFU refuse anything that is not a whole display.
+    const requireEntireScreen = Boolean(body.requireEntireScreen);
 
     const cap = Math.min(Number(maxParticipants) || MAX_MEET_PARTICIPANTS, MAX_MEET_PARTICIPANTS);
     const roomId = generateRoomId();

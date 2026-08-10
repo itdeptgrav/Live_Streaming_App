@@ -1,4 +1,5 @@
 import EmbedRoom from "./EmbedRoom";
+import { readEmbedOptions } from "@/lib/embedOptions";
 
 // Server wrapper. Reading the token here rather than in a client effect keeps
 // it available on the very first render — no cascading re-render, and no
@@ -17,6 +18,7 @@ export default async function EmbedRoomPage({ params, searchParams }) {
       roomId={roomId}
       token={query?.token || null}
       parentOrigin={query?.parentOrigin || "*"}
+      options={readEmbedOptions(query || {})}
     />
   );
 }

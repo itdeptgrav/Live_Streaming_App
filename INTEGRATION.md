@@ -187,6 +187,41 @@ Optional query params:
 | `token`        | **Required.** The room token from the API.                          |
 | `parentOrigin` | Restricts `postMessage` events to this exact origin. Defaults to `*`. |
 
+### Making it look like your product
+
+The embed draws a header, a timer and a control bar by default. If your page
+already has those, they duplicate yours and the two collide. Every piece is
+independently switchable, so you can render your own and drive the session over
+`postMessage`.
+
+| Param | Values | Default | Effect |
+| --- | --- | --- | --- |
+| `ui` | `full`, `minimal`, `bare` | `full` | Preset. `minimal` drops the header, `bare` drops all chrome |
+| `header` | `0` / `1` | from `ui` | The top status bar |
+| `controls` | `0` / `1` | from `ui` | The bottom button bar |
+| `participants` | `0` / `1` | from `ui` | The "N connected" count |
+| `timer` | `0` / `1` | from `ui` | The elapsed-time clock |
+| `theme` | `dark`, `light` | `dark` | Colour scheme |
+| `accent` | hex colour | `#34d399` | Accent, e.g. `%2300aaff` |
+| `startLabel` | text | `Start sharing` | Relabel the start button, e.g. `Go%20online` |
+| `selfPreview` | `0` / `1` | `0` | Show the sharer a preview of their own screen |
+
+```
+https://live.grav.in/embed/ROOM_ID?token=…&ui=bare&theme=light&accent=%23ef4444
+```
+
+Individual flags override the preset, so `ui=bare&controls=1` gives you the
+buttons and nothing else.
+
+> **`selfPreview` is off for a reason.** A preview of a whole display, drawn on
+> that display, is an infinite mirror — and it occupies the space the person is
+> meant to be working in. Turn it on only when sharing a window rather than a
+> screen.
+
+> **`ui=bare` still shows a start button when idle.** Opening the screen picker
+> requires a gesture inside the iframe, so with no button in the frame a share
+> can never begin. Once sharing starts, nothing is drawn.
+
 ### Events from the iframe
 
 ```js

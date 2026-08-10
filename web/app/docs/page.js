@@ -691,6 +691,59 @@ Content-Type: application/json
               ],
             ]}
           />
+
+          <h3 className="pt-2 text-sm font-semibold">
+            Making it look like your product
+          </h3>
+          <p className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            The embed draws a header, a timer and a control bar by default. If
+            your page already has those, they duplicate yours and the two
+            collide. Every piece is independently switchable, so you can render
+            your own and drive the session over <C>postMessage</C>.
+          </p>
+          <Table
+            caption="Appearance options"
+            head={["Param", "Values", "Default", "Effect"]}
+            rows={[
+              ["ui", "full, minimal, bare", "full", "Preset. minimal drops the header, bare drops all chrome"],
+              ["header", "0 / 1", "from ui", "The top status bar"],
+              ["controls", "0 / 1", "from ui", "The bottom button bar"],
+              ["participants", "0 / 1", "from ui", "The “N connected” count"],
+              ["timer", "0 / 1", "from ui", "The elapsed-time clock"],
+              ["theme", "dark, light", "dark", "Colour scheme"],
+              ["accent", "hex colour", "#34d399", "Accent, e.g. %2300aaff"],
+              ["startLabel", "text", "Start sharing", "Relabel the start button"],
+              ["selfPreview", "0 / 1", "0", "Show the sharer their own screen"],
+            ].map(([param, values, def, effect]) => [
+              <code key="p" className="font-mono text-xs">
+                {param}
+              </code>,
+              <span key="v" className="font-mono text-xs">
+                {values}
+              </span>,
+              <span key="d" className="font-mono text-xs">
+                {def}
+              </span>,
+              effect,
+            ])}
+          />
+          <pre className={PRE}>
+            <code>{`https://live.grav.in/embed/ROOM_ID?token=…&ui=bare&theme=light&accent=%23ef4444`}</code>
+          </pre>
+          <p className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            Individual flags override the preset, so{" "}
+            <C>ui=bare&amp;controls=1</C> gives you the buttons and nothing else.
+          </p>
+          <Callout tone="amber" title="selfPreview is off for a reason">
+            A preview of a whole display, drawn on that display, is an infinite
+            mirror — and it occupies the space the person is meant to be working
+            in. Turn it on only when sharing a window rather than a screen.
+          </Callout>
+          <Callout tone="emerald" title="bare still shows a start button when idle">
+            Opening the screen picker requires a gesture inside the iframe, so
+            with no button in the frame a share could never begin. Once sharing
+            starts, nothing is drawn.
+          </Callout>
         </Section>
 
         {/* ------------------------------------------------------- events */}
