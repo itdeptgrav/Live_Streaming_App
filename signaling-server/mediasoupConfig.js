@@ -6,7 +6,7 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 // Tune ANNOUNCED_IP for production: it must be the realtime server's public IP
 // (or public hostname resolved to IP) so remote participants' ICE negotiation
 // can reach it. Leave unset for local dev (mediasoup falls back to listenIp).
-const ANNOUNCED_IP = process.env.MEDIASOUP_ANNOUNCED_IP || "172.18.85.215";
+const ANNOUNCED_IP = process.env.MEDIASOUP_ANNOUNCED_IP || "192.168.1.55";
 
 
 export const workerSettings = {
