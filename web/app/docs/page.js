@@ -203,6 +203,11 @@ const ERRORS = [
     "Check the allow attribute.",
   ],
   [
+    "EMBED_NOT_VISIBLE",
+    "The iframe is hidden, zero-sized or in a background tab, so no picker can open.",
+    "Reveal the embed before starting a share.",
+  ],
+  [
     "DEVICE_PERMISSION_DENIED",
     "Camera/mic unavailable in a meeting room.",
     "Check the permission prompt.",
@@ -862,10 +867,23 @@ window.addEventListener("message", (event) => {
             <C>toggle-screen-share</C>, <C>toggle-mic</C>, <C>toggle-camera</C>,{" "}
             <C>leave</C>.
           </p>
-          <Callout tone="amber" title="A user gesture is required">
-            Browsers only open the screen picker in response to a user gesture.
-            Calling <C>start-screen-share</C> from your own button click works;
-            calling it on a timer or on page load will be blocked.
+          <Callout tone="amber" title="Starting a share must happen inside the embed">
+            Opening the screen picker needs a user gesture{" "}
+            <em>in the frame that calls it</em>, and browsers do not carry a
+            click in your page across <C>postMessage</C> into the iframe. So{" "}
+            <C>start-screen-share</C> and <C>toggle-screen-share</C> are
+            unreliable for <em>starting</em> a share — the user should press the
+            embed&rsquo;s own button. <C>stop-screen-share</C>, <C>toggle-mic</C>,{" "}
+            <C>toggle-camera</C> and <C>leave</C> need no gesture and always
+            work.
+          </Callout>
+          <Callout tone="rose" title="The embed must be visible to start a share">
+            The picker is opened by the iframe, so the iframe has to be on
+            screen at that moment. A <C>display:none</C>, zero-sized, or
+            fully-covered frame gets no picker. If you keep the embed hidden
+            until sharing begins, reveal it <em>first</em>. When the embed
+            detects this it reports <C>EMBED_NOT_VISIBLE</C> rather than failing
+            silently.
           </Callout>
         </Section>
 

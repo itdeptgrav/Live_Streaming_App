@@ -596,6 +596,13 @@ function PublisherStage({
     );
   }
 
+  // While sharing a whole display, a live self-preview would show the screen
+  // that contains the preview — an infinite mirror that also eats the space the
+  // person is meant to be working in. Confirm the state in words instead.
+  if (screenMode && sharing) {
+    return <SharingConfirmation capture={sharing.capture} />;
+  }
+
   return (
     <div className="flex min-h-0 flex-1 flex-col gap-3">
       {sharing && (
@@ -643,6 +650,31 @@ function PublisherStage({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// Shown to someone sharing their whole display. Deliberately text-only and
+// small: anything rendered here is itself on the screen being captured, so the
+// watcher sees it too.
+function SharingConfirmation({ capture }) {
+  return (
+    <div className="grid flex-1 place-items-center">
+      <div className="max-w-xs px-6 text-center">
+        <span className="mx-auto flex h-2.5 w-2.5">
+          <span className="absolute inline-flex h-2.5 w-2.5 animate-ping rounded-full bg-emerald-400 opacity-60" />
+          <span className="relative inline-flex h-2.5 w-2.5 rounded-full bg-emerald-400" />
+        </span>
+        <h2 className="mt-4 text-sm font-semibold text-white">Your screen is being shared</h2>
+        <p className="mt-1.5 text-[13px] leading-relaxed text-zinc-400">
+          {surfaceLabel(capture.displaySurface)}
+          {capture.width ? ` · ${capture.width}×${capture.height}` : ""}
+        </p>
+        <p className="mt-3 text-[12px] leading-relaxed text-zinc-500">
+          You can minimise this and carry on working. Sharing continues until
+          you stop it.
+        </p>
+      </div>
     </div>
   );
 }

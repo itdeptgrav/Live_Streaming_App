@@ -32,11 +32,32 @@ export class ScreenCaptureError extends Error {
  * Throws ScreenCaptureError with a `code` the UI can branch on:
  *   CANCELLED               - user dismissed the picker
  *   PERMISSION_DENIED       - blocked by the browser or a missing iframe allow=
+ *   EMBED_NOT_VISIBLE       - the iframe is hidden, so no picker can open
  *   ENTIRE_SCREEN_REQUIRED  - policy wanted a whole display, user picked otherwise
  *   SURFACE_UNKNOWN         - policy applies but the browser won't report the surface
  *   NO_VIDEO_TRACK          - capture produced nothing usable
  */
 export async function captureScreen({ requireEntireScreen = false } = {}) {
+  // The picker is opened by THIS frame, so this frame has to be on screen when
+  // it happens. A hidden or zero-sized iframe gets no picker and, in some
+  // browsers, no error either — it simply never resolves. Fail loudly instead,
+  // because a silent no-op here looks like a broken product.
+  if (window.innerWidth === 0 || window.innerHeight === 0) {
+    throw new ScreenCaptureError(
+      "EMBED_NOT_VISIBLE",
+      "The screen picker cannot open because this view is hidden. Make the " +
+        "Grav Stream iframe visible before starting a share — it cannot be " +
+        "display:none, zero-sized, or behind another element."
+    );
+  }
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") {
+    throw new ScreenCaptureError(
+      "EMBED_NOT_VISIBLE",
+      "The screen picker cannot open while this tab is in the background. " +
+        "Return to the tab and try again."
+    );
+  }
+
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({

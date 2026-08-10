@@ -219,6 +219,7 @@ window.addEventListener("message", (event) => {
 | `ENTIRE_SCREEN_REQUIRED` | They picked a window or tab in a room that demands a full display. `capture.displaySurface` says which. | "Share your entire screen, not a single window." |
 | `SURFACE_UNKNOWN` | The browser will not report the surface, so the policy cannot be verified. | "Use Chrome or Edge." |
 | `PERMISSION_DENIED` | Blocked by the browser, usually a missing iframe `allow`. | Check the `allow` attribute. |
+| `EMBED_NOT_VISIBLE` | The iframe is hidden, zero-sized, or in a background tab, so no picker can open. | Reveal the embed before starting a share. |
 | `DEVICE_PERMISSION_DENIED` | Camera/mic unavailable in a meeting room. | Check the permission prompt. |
 | `SERVER_UNREACHABLE` | Could not reach the streaming server. | Retry / check status. |
 
@@ -238,9 +239,18 @@ iframeEl.contentWindow.postMessage(
 Supported types: `start-screen-share`, `stop-screen-share`,
 `toggle-screen-share`, `toggle-mic`, `toggle-camera`, `leave`.
 
-> Browsers require a user gesture to open the screen picker. Calling
-> `start-screen-share` from your own button click works; calling it on a timer
-> or on page load will be blocked.
+> **Starting a share must happen inside the embed.** Opening the screen picker
+> requires a user gesture *in the frame that calls it*, and browsers do not
+> carry a click in your page across `postMessage` into the iframe. So
+> `start-screen-share` and `toggle-screen-share` are unreliable for *starting*
+> a share — let the user press the embed's own button. `stop-screen-share`,
+> `toggle-mic`, `toggle-camera` and `leave` need no gesture and always work.
+
+> **The embed must be visible to start a share.** The picker is opened by the
+> iframe, so the iframe has to be on screen at that moment. A `display:none`,
+> zero-sized, or fully-covered frame gets no picker. If you keep the embed
+> hidden until sharing starts, reveal it *first*. The embed detects this and
+> reports `EMBED_NOT_VISIBLE` rather than hanging silently.
 
 ---
 
