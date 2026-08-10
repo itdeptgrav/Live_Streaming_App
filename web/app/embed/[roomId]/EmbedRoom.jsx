@@ -92,17 +92,28 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*" }) {
 
   // ---------------- connect ----------------
 
+  // Held in a ref because enableCameraAndMic is defined below and startSession
+  // only ever calls it asynchronously, after the user has already gestured.
+  const enableDevicesRef = useRef(null);
+
   const startSession = useCallback(async () => {
     setError(null);
     setBusy(true);
     try {
       await connect({ needsSendTransport: !isViewer });
+      // Meeting rooms are camera-first, and the click that got us here is a
+      // valid user gesture for the permission prompt. Screen rooms deliberately
+      // do NOT do this — an employee sharing a screen is never asked for a
+      // camera or microphone.
+      if (!isViewer && mode !== "screen") {
+        await enableDevicesRef.current?.();
+      }
     } catch {
       // connect() already surfaced the message.
     } finally {
       setBusy(false);
     }
-  }, [connect, isViewer, setError]);
+  }, [connect, isViewer, mode, setError]);
 
   // A viewer needs no permission prompt, so there is nothing to wait for — join
   // as soon as the token is known. Publishers need a user gesture for the
@@ -219,6 +230,10 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*" }) {
     }
     setBusy(false);
   }, [publish, emit, setError]);
+
+  useEffect(() => {
+    enableDevicesRef.current = enableCameraAndMic;
+  }, [enableCameraAndMic]);
 
   // Pausing the producer stops sending RTP entirely. Flipping track.enabled
   // instead would keep transmitting black frames and silence, wasting the
