@@ -4,43 +4,82 @@
 // timer and a set of buttons, ours duplicate them and the two collide. So
 // every piece of chrome can be switched off independently and driven over
 // postMessage instead.
+//
+// Resolution order, weakest to strongest:
+//   1. defaults for the room mode and the participant's role
+//   2. a `ui` preset, if one was named
+//   3. individual flags
+//
+// Parsing is split from resolution because the mode and role only arrive with
+// the token, after the URL has already been read.
 
 const TRUE = new Set(["1", "true", "yes", "on"]);
 const FALSE = new Set(["0", "false", "no", "off"]);
 
-function flag(value, fallback) {
-  if (value == null) return fallback;
+function flag(value) {
+  if (value == null) return undefined;
   const v = String(value).toLowerCase();
   if (TRUE.has(v)) return true;
   if (FALSE.has(v)) return false;
-  return fallback;
+  return undefined;
 }
 
-// Presets are the common cases; individual flags still win over them.
 const PRESETS = {
   full: { header: true, controls: true, participants: true, timer: true },
   minimal: { header: false, controls: true, participants: false, timer: false },
   bare: { header: false, controls: false, participants: false, timer: false },
 };
 
-/** Accepts a plain object of query params (already decoded). */
+const CHROME_KEYS = ["header", "controls", "participants", "timer", "selfPreview"];
+
+/** Reads the URL. Chrome flags stay undefined unless explicitly given. */
 export function readEmbedOptions(query = {}) {
-  const preset = PRESETS[String(query.ui || "").toLowerCase()] || PRESETS.full;
+  const explicit = {};
+  for (const key of CHROME_KEYS) {
+    const value = flag(query[key]);
+    if (value !== undefined) explicit[key] = value;
+  }
 
   return {
-    header: flag(query.header, preset.header),
-    controls: flag(query.controls, preset.controls),
-    participants: flag(query.participants, preset.participants),
-    timer: flag(query.timer, preset.timer),
-    // A screen-mode publisher normally gets a text confirmation rather than a
-    // mirror of their own display. Hosts that want the preview can ask for it.
-    selfPreview: flag(query.selfPreview, false),
+    preset: PRESETS[String(query.ui || "").toLowerCase()] || null,
+    explicit,
     theme: ["dark", "light"].includes(String(query.theme).toLowerCase())
       ? String(query.theme).toLowerCase()
       : "dark",
     accent: sanitizeColor(query.accent) || "#34d399",
-    // Shown in place of the default "Start sharing" wording.
     startLabel: typeof query.startLabel === "string" ? query.startLabel.slice(0, 40) : null,
+  };
+}
+
+/**
+ * Applies mode- and role-aware defaults, then the preset, then explicit flags.
+ *
+ * A screen session is not a meeting: there is no one to introduce, no call to
+ * time, and nothing to leave — closing the frame ends it. So the status bar is
+ * off by default, and a watcher gets no controls at all. A publisher keeps the
+ * control bar because the share button lives there and the browser will not
+ * open a picker without a click inside this frame.
+ */
+export function resolveEmbedUi(options, { mode, isViewer } = {}) {
+  const screen = mode === "screen";
+
+  const base = screen
+    ? {
+        header: false,
+        timer: false,
+        participants: false,
+        controls: !isViewer,
+        selfPreview: false,
+      }
+    : { header: true, timer: true, participants: true, controls: true, selfPreview: false };
+
+  return {
+    ...base,
+    ...(options?.preset || {}),
+    ...(options?.explicit || {}),
+    theme: options?.theme || "dark",
+    accent: options?.accent || "#34d399",
+    startLabel: options?.startLabel || null,
   };
 }
 

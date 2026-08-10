@@ -11,6 +11,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { readRoomTokenClaims, surfaceLabel } from "@/lib/roomToken";
+import { resolveEmbedUi } from "@/lib/embedOptions";
 import { captureScreen } from "@/lib/screenCapture";
 import { useRoomConnection } from "./useRoomConnection";
 
@@ -18,10 +19,6 @@ const CHANNEL = "grav-stream";
 const PARENT_CHANNEL = "grav-stream-parent";
 
 export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }) {
-  const ui = options || {
-    header: true, controls: true, participants: true, timer: true,
-    selfPreview: false, theme: "dark", accent: "#34d399", startLabel: null,
-  };
   const claims = useMemo(() => readRoomTokenClaims(token), [token]);
 
   const originRef = useRef(parentOrigin);
@@ -56,6 +53,13 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
   const mode = session?.mode || claims?.mode || "meeting";
   const requireEntireScreen = session?.requireEntireScreen ?? claims?.requireEntireScreen ?? false;
   const isViewer = role === "viewer";
+
+  // Chrome depends on what kind of session this is, so it cannot be settled
+  // until the token has told us the mode and the role.
+  const ui = useMemo(
+    () => resolveEmbedUi(options, { mode, isViewer }),
+    [options, mode, isViewer]
+  );
 
   const [sharing, setSharing] = useState(null); // { capture }
   const [micOn, setMicOn] = useState(false);
@@ -439,7 +443,10 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
         )}
       </div>
 
-      {phase === "live" && ui.controls && (
+      {/* Before a screen share starts, the centred button is the whole call to
+          action — a second "Share screen" in a control bar underneath is the
+          same command twice. The bar returns once sharing begins, to offer Stop. */}
+      {phase === "live" && ui.controls && (mode !== "screen" || sharing) && (
         <ControlBar
           isViewer={isViewer}
           light={light}
@@ -456,6 +463,7 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
           onToggleMic={toggleMic}
           onToggleCamera={toggleCamera}
           onLeave={leave}
+          screenMode={mode === "screen"}
         />
       )}
 
@@ -823,6 +831,7 @@ function ControlBar({
   onToggleMic,
   onToggleCamera,
   onLeave,
+  screenMode = false,
 }) {
   return (
     <div
@@ -849,9 +858,14 @@ function ControlBar({
             {cameraOn ? "Stop video" : "Start video"}
           </Button>
         )}
-        <Button onClick={onLeave} tone="danger">
-          {isViewer ? "Close" : "Leave"}
-        </Button>
+        {/* A screen session ends when the host closes or navigates away from
+            the frame, so a leave button is a second way to do what closing
+            already does — and on the watching side there is nothing to leave. */}
+        {!screenMode && (
+          <Button onClick={onLeave} tone="danger">
+            {isViewer ? "Close" : "Leave"}
+          </Button>
+        )}
       </div>
     </div>
   );
