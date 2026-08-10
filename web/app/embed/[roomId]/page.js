@@ -4,7 +4,8 @@ import EmbedRoom from "./EmbedRoom";
 // it available on the very first render — no cascading re-render, and no
 // Suspense boundary that useSearchParams() would have forced.
 export const metadata = {
-  title: "Meeting",
+  title: "Live session",
+  robots: { index: false, follow: false },
 };
 
 export default async function EmbedRoomPage({ params, searchParams }) {

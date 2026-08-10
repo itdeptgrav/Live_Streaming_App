@@ -386,8 +386,15 @@ export function useRoomConnection({ roomId, token, onEvent }) {
   }, []);
 
   const disconnect = useCallback(() => {
+    // No socket means there is nothing to tear down, and moving to "ended"
+    // would be wrong. StrictMode runs this cleanup once before the real mount,
+    // which otherwise left publishers stranded on "Session ended" before they
+    // had connected at all.
+    if (!wsRef.current) return;
+
     send({ type: "meet-leave" });
-    wsRef.current?.close();
+    wsRef.current.close();
+    wsRef.current = null;
     sendTransportRef.current?.close();
     recvTransportRef.current?.close();
     sendTransportRef.current = null;
