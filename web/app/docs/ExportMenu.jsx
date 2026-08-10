@@ -33,14 +33,16 @@ export default function ExportMenu() {
     };
   }, [open]);
 
-  async function copy() {
-    setCopied("working");
+  // Tracks which item is copying, so the feedback lands on the button that
+  // was actually pressed rather than on whichever one renders it.
+  async function copy(path) {
+    setCopied({ path, state: "working" });
     try {
-      const text = await fetch("/docs/llms.txt").then((r) => r.text());
+      const text = await fetch(path).then((r) => r.text());
       await navigator.clipboard.writeText(text);
-      setCopied("done");
+      setCopied({ path, state: "done" });
     } catch {
-      setCopied("failed");
+      setCopied({ path, state: "failed" });
     }
     setTimeout(() => {
       setCopied(null);
@@ -81,22 +83,40 @@ export default function ExportMenu() {
               For pasting into an AI assistant
             </span>
           </a>
-          <button role="menuitem" type="button" onClick={copy} className={LINK}>
-            <span className="font-medium">
-              {copied === "done"
-                ? "Copied"
-                : copied === "failed"
-                  ? "Copy failed"
-                  : copied === "working"
-                    ? "Copying…"
-                    : "Copy to clipboard"}
-            </span>
-            <span className="mt-0.5 block text-xs text-zinc-500 dark:text-zinc-400">
-              No file, nothing to download
-            </span>
-          </button>
+          <CopyItem
+            label="Copy setup prompt"
+            hint="Hand to an AI to wire up screen sharing"
+            path="/docs/publisher-prompt.txt"
+            copied={copied}
+            onCopy={copy}
+          />
+          <CopyItem
+            label="Copy to clipboard"
+            hint="The full reference, no file to download"
+            path="/docs/llms.txt"
+            copied={copied}
+            onCopy={copy}
+          />
         </span>
       )}
     </span>
+  );
+}
+
+function CopyItem({ label, hint, path, copied, onCopy }) {
+  const mine = copied?.path === path ? copied.state : null;
+  return (
+    <button role="menuitem" type="button" onClick={() => onCopy(path)} className={LINK}>
+      <span className="font-medium">
+        {mine === "done"
+          ? "Copied"
+          : mine === "failed"
+            ? "Copy failed"
+            : mine === "working"
+              ? "Copying…"
+              : label}
+      </span>
+      <span className="mt-0.5 block text-xs text-zinc-500 dark:text-zinc-400">{hint}</span>
+    </button>
   );
 }
