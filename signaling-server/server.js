@@ -3,19 +3,24 @@ import { WebSocketServer } from "ws";
 import { randomUUID } from "crypto";
 import { isKnownRoom, MAX_VIEWERS_PER_ROOM, ROOMS } from "./rooms.js";
 import {
-  generateRoomId,
-  createMeetRoomRecord,
   getMeetRoom,
-  meetRoomInfo,
   ensureRouter,
   roomIsFull,
   createWebRtcTransport,
   removePeer,
 } from "./meetRooms.js";
+import { reconcileOpenSessions } from "./db.js";
+import { verifyRoomToken } from "./auth.js";
+import { openUsageSession, closeUsageSession } from "./platformStore.js";
+import { handleApiRequest } from "./httpApi.js";
 
 const PORT = process.env.PORT || 4000;
-// Comma-separated list, e.g. "https://your-app.vercel.app,http://localhost:3000"
-const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*").split(",");
+// Comma-separated list, e.g. "https://live.grav.in,http://localhost:3000"
+const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*").split(",").map((o) => o.trim());
+// Advertised back to API clients so their frontends know where to connect.
+const PUBLIC_URL = process.env.PUBLIC_URL || `ws://localhost:${PORT}`;
+
+reconcileOpenSessions();
  
 // ---- office-monitor rooms (unchanged mesh mode) ----
 // roomId -> { broadcaster: ws|null, viewers: Map<viewerId, ws> }
@@ -47,12 +52,13 @@ function corsOrigin(req) {
   return ALLOWED_ORIGINS.includes(origin) ? origin : ALLOWED_ORIGINS[0];
 }
 
-// ---- plain HTTP: REST for Meet room creation/lookup ----
+// ---- plain HTTP: dashboard + public v1 API ----
 const httpServer = http.createServer(async (req, res) => {
   const origin = corsOrigin(req);
   res.setHeader("Access-Control-Allow-Origin", origin);
-  res.setHeader("Access-Control-Allow-Methods", "GET,POST,OPTIONS");
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+  res.setHeader("Access-Control-Allow-Methods", "GET,POST,DELETE,OPTIONS");
+  res.setHeader("Access-Control-Allow-Headers", "Content-Type,Authorization");
+  if (origin !== "*") res.setHeader("Vary", "Origin");
 
   if (req.method === "OPTIONS") {
     res.writeHead(204);
@@ -60,30 +66,26 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
-  if (req.method === "POST" && req.url === "/api/meet-rooms") {
-    const roomId = generateRoomId();
-    createMeetRoomRecord(roomId);
-    res.writeHead(201, { "Content-Type": "application/json" });
-    res.end(JSON.stringify({ roomId }));
+  try {
+    const handled = await handleApiRequest(req, res, { publicUrl: PUBLIC_URL });
+    if (handled) return;
+  } catch (err) {
+    console.error(`[http] ${req.method} ${req.url}:`, err);
+    if (!res.headersSent) {
+      res.writeHead(400, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ error: err.message || "Bad request" }));
+    }
     return;
   }
 
-  const infoMatch = req.method === "GET" && req.url.match(/^\/api\/meet-rooms\/([\w-]+)$/);
-  if (infoMatch) {
-    const info = meetRoomInfo(infoMatch[1]);
-    res.writeHead(info ? 200 : 404, { "Content-Type": "application/json" });
-    res.end(JSON.stringify(info || { error: "not found" }));
-    return;
-  }
-
-  res.writeHead(404);
-  res.end();
+  res.writeHead(404, { "Content-Type": "application/json" });
+  res.end(JSON.stringify({ error: "Not found" }));
 });
 
 const wss = new WebSocketServer({ server: httpServer });
 
 wss.on("connection", (ws) => {
-  ws.meta = { mode: null, role: null, roomId: null, viewerId: null, peerId: null };
+  ws.meta = { mode: null, role: null, roomId: null, viewerId: null, peerId: null, usageId: null };
 
   ws.on("message", async (raw) => {
     let msg;
@@ -103,6 +105,7 @@ wss.on("connection", (ws) => {
       console.error(`[error] handling "${msg.type}":`, err);
       send(ws, {
         type: "error",
+        rid: msg.rid,
         producerId: msg.producerId,
         consumerId: msg.consumerId,
         message: `Server error handling ${msg.type}: ${err.message}`,
@@ -112,6 +115,8 @@ wss.on("connection", (ws) => {
 
   ws.on("close", () => {
     if (ws.meta.mode === "meet") {
+      closeUsageSession(ws.meta.usageId);
+      ws.meta.usageId = null;
       const room = getMeetRoom(ws.meta.roomId);
       if (room && ws.meta.peerId) {
         removePeer(room, ws.meta.peerId);
@@ -219,19 +224,40 @@ async function handleMeetMessage(ws, msg) {
     case "meet-join": {
       const room = getMeetRoom(msg.roomId);
       if (!room) {
-        send(ws, { type: "error", message: "Room does not exist" });
+        send(ws, { type: "error", rid: msg.rid, message: "Room does not exist" });
         return;
       }
       if (roomIsFull(room)) {
-        send(ws, { type: "error", message: "Room is full" });
+        send(ws, { type: "error", rid: msg.rid, message: "Room is full" });
         return;
+      }
+
+      // Rooms created through the v1 API belong to an account and require a
+      // signed room token. Legacy demo rooms (no owner) stay open so the
+      // original /meet pages keep working without credentials.
+      let claims = null;
+      if (room.ownerUserId) {
+        claims = verifyRoomToken(msg.token);
+        if (!claims) {
+          send(ws, { type: "error", rid: msg.rid, message: "A valid room token is required to join this room" });
+          return;
+        }
+        if (claims.room !== msg.roomId) {
+          send(ws, { type: "error", rid: msg.rid, message: "Room token is not valid for this room" });
+          return;
+        }
       }
 
       const router = await ensureRouter(room);
       const peerId = randomUUID();
+      const identity = claims?.sub || msg.identity || peerId;
+      const displayName = claims?.name || msg.displayName || "Guest";
+
       room.peers.set(peerId, {
         ws,
-        displayName: msg.displayName || "Guest",
+        identity,
+        displayName,
+        canPublish: claims ? claims.canPublish !== false : true,
         transports: new Map(),
         producers: new Map(),
         consumers: new Map(),
@@ -240,10 +266,21 @@ async function handleMeetMessage(ws, msg) {
       ws.meta.mode = "meet";
       ws.meta.roomId = msg.roomId;
       ws.meta.peerId = peerId;
+      if (room.ownerUserId) {
+        ws.meta.usageId = openUsageSession({
+          userId: room.ownerUserId,
+          roomId: msg.roomId,
+          peerId,
+          identity,
+          displayName,
+        });
+      }
 
       const existingProducers = [];
+      const existingPeers = [];
       for (const [otherId, peer] of room.peers) {
         if (otherId === peerId) continue;
+        existingPeers.push({ peerId: otherId, identity: peer.identity, name: peer.displayName });
         for (const producer of peer.producers.values()) {
           existingProducers.push({
             producerId: producer.id,
@@ -257,9 +294,19 @@ async function handleMeetMessage(ws, msg) {
       send(ws, {
         type: "meet-joined",
         peerId,
+        identity,
+        displayName,
         rtpCapabilities: router.rtpCapabilities,
         existingProducers,
+        existingPeers,
       });
+
+      // Announce the arrival so clients can render a participant tile before
+      // any track is published (a peer may join muted and camera-off).
+      for (const [otherId, otherPeer] of room.peers) {
+        if (otherId === peerId) continue;
+        send(otherPeer.ws, { type: "meet-peer-joined", peerId, identity, name: displayName });
+      }
       break;
     }
 
@@ -272,6 +319,7 @@ async function handleMeetMessage(ws, msg) {
 
       send(ws, {
         type: "meet-transport-created",
+        rid: msg.rid,
         direction: msg.direction,
         transportId: transport.id,
         iceParameters: transport.iceParameters,
@@ -287,13 +335,17 @@ async function handleMeetMessage(ws, msg) {
       const transport = peer.transports.get(msg.transportId);
       if (!transport) return;
       await transport.connect({ dtlsParameters: msg.dtlsParameters });
-      send(ws, { type: "meet-transport-connected", transportId: msg.transportId });
+      send(ws, { type: "meet-transport-connected", rid: msg.rid, transportId: msg.transportId });
       break;
     }
 
     case "meet-produce": {
       const { room, peer } = currentMeetPeer(ws);
       if (!room || !peer) return;
+      if (peer.canPublish === false) {
+        send(ws, { type: "error", rid: msg.rid, message: "This token does not grant publish permission" });
+        return;
+      }
       const transport = peer.transports.get(msg.transportId);
       if (!transport) return;
 
@@ -304,7 +356,7 @@ async function handleMeetMessage(ws, msg) {
       });      peer.producers.set(producer.id, producer);
       console.log(`[meet] peer ${ws.meta.peerId} produced ${producer.kind} producer ${producer.id}`);
 
-      send(ws, { type: "meet-produced", producerId: producer.id });
+      send(ws, { type: "meet-produced", rid: msg.rid, producerId: producer.id });
 
       for (const [otherId, otherPeer] of room.peers) {
         if (otherId === ws.meta.peerId) continue;
@@ -343,7 +395,7 @@ async function handleMeetMessage(ws, msg) {
   case "meet-consume": {
       const { room, peer } = currentMeetPeer(ws);
       if (!room || !peer) {
-        send(ws, { type: "error", producerId: msg.producerId, message: "Not in a room" });
+        send(ws, { type: "error", rid: msg.rid, producerId: msg.producerId, message: "Not in a room" });
         return;
       }
 
@@ -355,14 +407,14 @@ async function handleMeetMessage(ws, msg) {
         `[meet] peer ${ws.meta.peerId} consume request for producer ${msg.producerId} — canConsume=${canConsume}`
       );
       if (!canConsume) {
-        send(ws, { type: "error", producerId: msg.producerId, message: "Cannot consume this producer" });
+        send(ws, { type: "error", rid: msg.rid, producerId: msg.producerId, message: "Cannot consume this producer" });
         return;
       }
 
       const transport = peer.transports.get(msg.transportId);
       if (!transport) {
         console.log(`[meet] peer ${ws.meta.peerId} consume: no transport ${msg.transportId}`);
-        send(ws, { type: "error", producerId: msg.producerId, message: "No such recv transport" });
+        send(ws, { type: "error", rid: msg.rid, producerId: msg.producerId, message: "No such recv transport" });
         return;
       }
 
@@ -378,11 +430,13 @@ async function handleMeetMessage(ws, msg) {
 
        send(ws, {
         type: "meet-consumed",
+        rid: msg.rid,
         consumerId: consumer.id,
         producerId: msg.producerId,
         kind: consumer.kind,
         rtpParameters: consumer.rtpParameters,
         source: consumer.producerAppData?.source,
+        peerId: producerPeerId(room, msg.producerId),
       });
       break;
     }
@@ -423,6 +477,8 @@ async function handleMeetMessage(ws, msg) {
     }
 
     case "meet-leave": {
+      closeUsageSession(ws.meta.usageId);
+      ws.meta.usageId = null;
       const room = getMeetRoom(ws.meta.roomId);
       if (room && ws.meta.peerId) {
         removePeer(room, ws.meta.peerId);
@@ -444,6 +500,15 @@ function currentMeetPeer(ws) {
   return { room, peer };
 }
 
+/** Which peer owns a producer — lets clients attribute a track to a participant. */
+function producerPeerId(room, producerId) {
+  for (const [peerId, peer] of room.peers) {
+    if (peer.producers.has(producerId)) return peerId;
+  }
+  return null;
+}
+
 httpServer.listen(PORT, () => {
   console.log(`Realtime server (signaling + REST) listening on http://localhost:${PORT}`);
+  console.log(`Advertising client connect URL: ${PUBLIC_URL}`);
 });

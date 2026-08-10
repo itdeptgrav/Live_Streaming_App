@@ -16,7 +16,9 @@ fi
 
 echo "==> Installing base packages"
 apt-get update -y
-apt-get install -y curl nginx certbot python3-certbot-nginx ufw
+# build-essential/python3 are the fallback toolchain for better-sqlite3 on the
+# rare occasion no prebuilt binary matches this Node ABI.
+apt-get install -y curl nginx certbot python3-certbot-nginx ufw build-essential python3
 
 echo "==> Installing Node.js 20"
 curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
@@ -27,12 +29,20 @@ echo "==> Installing signaling-server dependencies"
 cd "$APP_DIR"
 npm install --omit=dev
 
+# The database lives outside APP_DIR so re-uploading the app cannot destroy it.
+mkdir -p /var/lib/grav-stream
+
 if [ ! -f .env ]; then
   cp .env.example .env
   PUBLIC_IP=$(curl -4 -s ifconfig.me)
-  sed -i "s/^MEDIASOUP_ANNOUNCED_IP=.*/MEDIASOUP_ANNOUNCED_IP=${PUBLIC_IP}/" .env
-  echo "!! Wrote .env with detected public IP ${PUBLIC_IP}."
-  echo "!! Now edit $APP_DIR/.env and set ALLOWED_ORIGINS to your frontend's URL."
+  SECRET=$(node -e "console.log(require('crypto').randomBytes(32).toString('hex'))")
+  sed -i "s|^MEDIASOUP_ANNOUNCED_IP=.*|MEDIASOUP_ANNOUNCED_IP=${PUBLIC_IP}|" .env
+  sed -i "s|^TOKEN_SECRET=.*|TOKEN_SECRET=${SECRET}|" .env
+  sed -i "s|^PUBLIC_URL=.*|PUBLIC_URL=wss://${DOMAIN}|" .env
+  echo "!! Wrote .env: public IP ${PUBLIC_IP}, generated TOKEN_SECRET, PUBLIC_URL=wss://${DOMAIN}"
+  echo "!! Now edit $APP_DIR/.env and set ALLOWED_ORIGINS to your dashboard's URL."
+else
+  echo "==> .env already exists, leaving it untouched"
 fi
 
 echo "==> Configuring Nginx"

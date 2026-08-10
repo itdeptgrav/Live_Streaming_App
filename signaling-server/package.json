@@ -9,6 +9,7 @@
     "start": "node --env-file=.env server.js"
   },
   "dependencies": {
+    "better-sqlite3": "^11.8.1",
     "mediasoup": "^3.19.3",
     "ws": "^8.18.0"
   }

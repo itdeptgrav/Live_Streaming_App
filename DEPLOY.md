@@ -1,5 +1,22 @@
 # Deploying KUMKUM
 
+> **Current production deployment (Aug 2026).** The live system runs on a
+> **DigitalOcean droplet with Nginx + pm2**, not the Oracle/Caddy/systemd path
+> described below:
+>
+> | Component | Host | Domain |
+> |---|---|---|
+> | `signaling-server/` | DigitalOcean droplet `157.245.101.63` | `stream.grav.in` |
+> | `web/` | Vercel | `live.grav.in` |
+>
+> Use **[Part 0 — the live setup](#part-0--the-live-setup-digitalocean--nginx--pm2)**
+> below for day-to-day deploys. Parts 1–3 remain a valid alternative if you ever
+> move to Oracle/Hetzner with Caddy, and the architecture, firewall, and
+> troubleshooting sections apply to both.
+>
+> Note the RTC port range is **40000–49999** (see `mediasoupConfig.js`), not the
+> 40000–40100 quoted in the older sections.
+
 Two pieces, two different kinds of host. This is not a preference — it's forced
 by how WebRTC works.
 
@@ -29,7 +46,88 @@ and why the announced address must be routable.
 
 ---
 
+## Part 0 — The live setup (DigitalOcean + Nginx + pm2)
+
+This is what is actually running. It also hosts the **platform layer** —
+accounts, API keys, usage metering, and the `/api/v1` REST API documented in
+[INTEGRATION.md](INTEGRATION.md).
+
+### 0.1 First-time provision
+
+```bash
+scp -r signaling-server root@<ip>:/opt/live-streaming-app/
+ssh root@<ip> "cd /opt/live-streaming-app/signaling-server && bash deploy/setup-local-upload.sh stream.grav.in"
+```
+
+`deploy/setup-local-upload.sh` installs Node 20, Nginx, certbot, and pm2; issues
+the TLS certificate; opens the firewall (SSH, HTTP/HTTPS, UDP+TCP 40000–49999);
+generates a `TOKEN_SECRET`; detects the public IP for `MEDIASOUP_ANNOUNCED_IP`;
+and starts the service under pm2 with reboot persistence.
+
+### 0.2 Updating an existing droplet
+
+From the project root (PowerShell). **Never copy `node_modules`** — it holds
+Windows-built binaries that cannot run on Linux and turns seconds into minutes:
+
+```powershell
+scp -r signaling-server/*.js signaling-server/package.json signaling-server/package-lock.json signaling-server/.env.example signaling-server/deploy root@157.245.101.63:/opt/live-streaming-app/signaling-server/
+```
+
+Then on the droplet:
+
+```bash
+bash /opt/live-streaming-app/signaling-server/deploy/update.sh
+```
+
+`update.sh` installs new dependencies, backfills any missing `TOKEN_SECRET` /
+`DATA_DIR` in `.env`, restarts pm2, and tails the log.
+
+### 0.3 Environment variables added by the platform layer
+
+On top of `PORT`, `ALLOWED_ORIGINS`, and `MEDIASOUP_ANNOUNCED_IP`:
+
+| Key | Purpose |
+|---|---|
+| `PUBLIC_URL` | `wss://stream.grav.in` — returned to API clients as `url` |
+| `TOKEN_SECRET` | HS256 key signing room tokens. **Rotating it invalidates every outstanding token.** If unset, an ephemeral one is generated per boot and tokens die on restart. |
+| `DATA_DIR` | `/var/lib/grav-stream` — SQLite location |
+
+`ALLOWED_ORIGINS` must now be `https://live.grav.in` exactly — no trailing
+slash, or the dashboard's API calls fail CORS.
+
+### 0.4 Data
+
+Accounts, API keys, rooms, and usage history live in
+`/var/lib/grav-stream/platform.db`. That path is deliberately **outside**
+`/opt/live-streaming-app` so re-uploading the app cannot destroy it. Back it up:
+
+```bash
+sqlite3 /var/lib/grav-stream/platform.db ".backup '/root/platform-backup.db'"
+```
+
+### 0.5 Frontend at `live.grav.in`
+
+Vercel → import repo → **Root Directory `web`** → env vars
+(`NEXT_PUBLIC_SIGNALING_URL=wss://stream.grav.in`, plus the metered.ca pair) →
+Domains → add `live.grav.in` → add the CNAME Vercel shows to GoDaddy DNS for
+`grav.in`.
+
+### 0.6 Verify
+
+```bash
+curl https://stream.grav.in/healthz     # → {"ok":true}
+```
+
+Then sign up in the dashboard, create an API key, and run the two calls in
+INTEGRATION.md. A `roomId` plus a minted token proves the database, signing key,
+and API auth are all wired. Opening the embed URL from two networks proves
+`MEDIASOUP_ANNOUNCED_IP` and the UDP rules are right.
+
+---
+
 ## Part 1 — The server
+
+> Alternative path (Oracle/Hetzner + Caddy + systemd). Not what is running today.
 
 ### 1.1 Get a box
 
@@ -229,9 +327,11 @@ firewall or announced-address problem, never application code.
 
 ## What this is not
 
-- **No authentication.** Anyone with a room link joins. No password, no waiting
-  room, no host controls, no kick. Fine for practice; do not put a client
-  meeting on it.
+- **Authentication depends on how the room was made.** Rooms created through
+  `/api/v1/rooms` require a signed room token to join, carry identity from that
+  token, and honour `canPublish`. Legacy rooms created via `POST /api/meet-rooms`
+  (the `/meet` pages) are still open to anyone with the link. There is still no
+  waiting room, host controls, or kick in either mode.
 - **Not scaled.** One mediasoup worker, one box. Two ARM cores start dropping
   frames somewhere past 10–15 simultaneous cameras. Screen-share-only calls go
   further.

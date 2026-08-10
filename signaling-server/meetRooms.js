@@ -21,20 +21,26 @@ async function getWorker() {
   return worker;
 }
 
-// roomId -> { id, createdAt, router, peers: Map<peerId, Peer> }
-// Peer: { ws, displayName, transports: Map<transportId, Transport>, producers: Map<producerId, Producer>, consumers: Map<consumerId, Consumer> }
+// roomId -> { id, createdAt, router, peers: Map<peerId, Peer>, maxParticipants, ownerUserId }
+// Peer: { ws, identity, displayName, transports: Map<transportId, Transport>, producers: Map<producerId, Producer>, consumers: Map<consumerId, Consumer> }
+//
+// ownerUserId is null for legacy/demo rooms created without an API key. Rooms
+// with an owner require a signed room token to join and accrue usage against
+// that account; ownerless rooms keep the original open behaviour.
 const meetRooms = new Map();
 
 export function generateRoomId() {
   return randomUUID().slice(0, 8);
 }
 
-export function createMeetRoomRecord(roomId) {
+export function createMeetRoomRecord(roomId, { maxParticipants, ownerUserId = null } = {}) {
   meetRooms.set(roomId, {
     id: roomId,
     createdAt: Date.now(),
     router: null,
     peers: new Map(),
+    maxParticipants: maxParticipants || MAX_MEET_PARTICIPANTS,
+    ownerUserId,
   });
   return meetRooms.get(roomId);
 }
@@ -58,7 +64,7 @@ export async function ensureRouter(room) {
 }
 
 export function roomIsFull(room) {
-  return room.peers.size >= MAX_MEET_PARTICIPANTS;
+  return room.peers.size >= (room.maxParticipants || MAX_MEET_PARTICIPANTS);
 }
 
 export async function createWebRtcTransport(router) {
@@ -89,4 +95,23 @@ export function removePeer(room, peerId) {
     room.router?.close();
     meetRooms.delete(room.id);
   }
+}
+
+/**
+ * Force-ends a room: closes every peer's transports and drops the router.
+ * Callers are responsible for notifying peers over the socket first — this
+ * only tears down the media side.
+ */
+export function closeMeetRoom(roomId) {
+  const room = meetRooms.get(roomId);
+  if (!room) return false;
+  for (const peer of room.peers.values()) {
+    peer.transports.forEach((t) => t.close());
+    peer.consumers.forEach((c) => c.close());
+    peer.producers.forEach((p) => p.close());
+  }
+  room.peers.clear();
+  room.router?.close();
+  meetRooms.delete(roomId);
+  return true;
 }
