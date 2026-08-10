@@ -363,13 +363,21 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
 
   const light = ui.theme === "light";
 
+  // A screen session is edge-to-edge video: padding and gaps would letterbox
+  // someone's desktop for no reason.
+  const screenStage = mode === "screen" && (sharing || screenFeeds.length > 0);
+  // The only permanent mark. Appears once a screen is actually live, and is
+  // kept deliberately quiet — it identifies the platform, it does not sell it.
+  const showWatermark = screenStage;
+
   return (
     <div
       style={{ "--accent": ui.accent }}
-      className={`flex h-dvh w-full flex-col ${
+      className={`relative flex h-dvh w-full flex-col ${
         light ? "bg-white text-zinc-900" : "bg-[#09090b] text-zinc-100"
       }`}
     >
+      {showWatermark && <Watermark light={light} />}
       {ui.header && (
         <TopBar
           role={role}
@@ -383,12 +391,17 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
         />
       )}
 
-      <div className="relative flex min-h-0 flex-1 flex-col gap-3 p-3">
+      <div
+        className={`relative flex min-h-0 flex-1 flex-col ${
+          screenStage ? "" : "gap-3 p-3"
+        }`}
+      >
         {error && <ErrorBar message={error} onDismiss={() => setError(null)} />}
 
         {/* ---- viewer ---- */}
         {isViewer && (
           <ViewerStage
+            screenMode={mode === "screen"}
             phase={phase}
             screenFeeds={screenFeeds}
             cameraFeeds={cameraFeeds}
@@ -472,6 +485,19 @@ function Notice({ title, body, tone = "neutral" }) {
       <h1 className="text-sm font-semibold">{title}</h1>
       <p className="mt-1.5 text-sm leading-relaxed text-zinc-400">{body}</p>
     </div>
+  );
+}
+
+function Watermark({ light }) {
+  return (
+    <span
+      aria-hidden
+      className={`pointer-events-none absolute right-2 bottom-1.5 z-10 text-[10px] font-normal tracking-wide select-none ${
+        light ? "text-zinc-900/25" : "text-white/25"
+      }`}
+    >
+      Grav Stream
+    </span>
   );
 }
 
@@ -718,7 +744,7 @@ function SharingConfirmation({ capture }) {
   );
 }
 
-function ViewerStage({ phase, screenFeeds, cameraFeeds, peerName, publishers, requestKeyFrame }) {
+function ViewerStage({ phase, screenFeeds, cameraFeeds, peerName, publishers, requestKeyFrame, screenMode }) {
   if (phase !== "live") {
     return (
       <div className="grid flex-1 place-items-center">
@@ -752,9 +778,13 @@ function ViewerStage({ phase, screenFeeds, cameraFeeds, peerName, publishers, re
         <RemoteVideo
           key={t.producerId}
           track={t}
-          label={`${peerName(t.peerId)} — screen`}
-          badge={t.displaySurface ? surfaceLabel(t.displaySurface) : null}
-          accent
+          // In a monitoring session the screen IS the interface. Borders,
+          // names and surface badges are our furniture sitting on top of
+          // someone else's product, so they are dropped entirely.
+          bare={screenMode}
+          label={screenMode ? null : `${peerName(t.peerId)} — screen`}
+          badge={!screenMode && t.displaySurface ? surfaceLabel(t.displaySurface) : null}
+          accent={!screenMode}
           contain
           className="min-h-0 flex-1"
           requestKeyFrame={requestKeyFrame}
@@ -844,7 +874,10 @@ function Button({ onClick, disabled, tone = "default", children }) {
   );
 }
 
-function Frame({ children, label, badge, accent, compact, className = "" }) {
+function Frame({ children, label, badge, accent, compact, bare = false, className = "" }) {
+  if (bare) {
+    return <div className={`relative overflow-hidden bg-black ${className}`}>{children}</div>;
+  }
   return (
     <div
       className={`relative overflow-hidden rounded-xl bg-black ring-1 ${
@@ -884,7 +917,7 @@ function RemoteAudio({ stream }) {
   return <audio ref={ref} autoPlay playsInline className="hidden" />;
 }
 
-function RemoteVideo({ track, label, badge, accent, compact, contain, className, requestKeyFrame }) {
+function RemoteVideo({ track, label, badge, accent, compact, contain, bare, className, requestKeyFrame }) {
   const ref = useRef(null);
   const [blocked, setBlocked] = useState(false);
 
@@ -932,7 +965,7 @@ function RemoteVideo({ track, label, badge, accent, compact, contain, className,
   }, [blocked]);
 
   return (
-    <Frame label={label} badge={badge} accent={accent} compact={compact} className={className}>
+    <Frame label={label} badge={badge} accent={accent} compact={compact} bare={bare} className={className}>
       <video
         ref={ref}
         autoPlay

@@ -47,6 +47,16 @@ is used to mint short-lived, per-user room tokens.
 
 ---
 
+## 0. Hand this to an AI
+
+A single plain-text export of everything below lives at
+**<https://live.grav.in/docs/llms.txt>**, or press **Export for AI** on the
+docs page. Paste it into an assistant and it has the whole picture — endpoints,
+token shape, embed parameters, events, error codes and the constraints — in one
+document.
+
+---
+
 ## 1. Get an API key
 
 Sign up at `https://live.grav.in/signup`, then **Dashboard → API keys → Create
@@ -222,6 +232,14 @@ buttons and nothing else.
 > requires a gesture inside the iframe, so with no button in the frame a share
 > can never begin. It carries your `startLabel` and `accent`, and once sharing
 > starts nothing is drawn at all.
+
+### What a screen room looks like
+
+In a `screen` room the shared screen is rendered edge to edge: no border, no
+name label, no surface badge, no accent colouring. The only permanent mark is a
+single low-contrast `Grav Stream` line in the bottom-right corner, which
+appears once a screen is actually live. The watcher sees the desktop and
+nothing else.
 
 ### There is no lobby
 
