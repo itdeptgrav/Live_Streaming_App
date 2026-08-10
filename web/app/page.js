@@ -200,7 +200,7 @@ export default function HomePage() {
 
           <nav className="flex items-center gap-1 sm:gap-2">
             <Link
-              href="/dashboard/docs"
+              href="/docs"
               className={`hidden rounded-lg px-3 py-1.5 text-sm text-zinc-600 transition-colors hover:text-zinc-900 sm:inline-flex dark:text-zinc-400 dark:hover:text-zinc-100 ${FOCUS}`}
             >
               Docs
@@ -331,7 +331,7 @@ export default function HomePage() {
               The full reference — every endpoint, the postMessage event table
               and the error codes — is in the{" "}
               <Link
-                href="/dashboard/docs"
+                href="/docs"
                 className={`rounded font-medium text-emerald-700 underline underline-offset-4 hover:text-emerald-600 dark:text-emerald-400 ${FOCUS}`}
               >
                 integration docs
@@ -549,7 +549,7 @@ export default function HomePage() {
               <Link href="/signup" className={PRIMARY_BTN}>
                 Get started
               </Link>
-              <Link href="/dashboard/docs" className={SECONDARY_BTN}>
+              <Link href="/docs" className={SECONDARY_BTN}>
                 Read the docs
               </Link>
             </div>
@@ -571,7 +571,7 @@ export default function HomePage() {
           </div>
           <nav aria-label="Footer" className="flex flex-wrap gap-x-6 gap-y-2">
             {[
-              { href: "/dashboard/docs", label: "Docs" },
+              { href: "/docs", label: "Docs" },
               { href: "/dashboard", label: "Dashboard" },
               { href: "/login", label: "Sign in" },
               { href: "/signup", label: "Get started" },

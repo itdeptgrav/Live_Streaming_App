@@ -9,7 +9,7 @@ const NAV = [
   { href: "/dashboard", label: "Overview" },
   { href: "/dashboard/keys", label: "API keys" },
   { href: "/dashboard/rooms", label: "Rooms" },
-  { href: "/dashboard/docs", label: "Docs" },
+  { href: "/docs", label: "Docs" },
 ];
 
 export default function DashboardLayout({ children }) {

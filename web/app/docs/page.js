@@ -1,9 +1,16 @@
 // Integration docs. This page is the rendered twin of INTEGRATION.md at the
 // repository root — endpoints, event names and error codes are kept identical
 // to it on purpose. Change both together or neither.
+//
+// Deliberately public: a developer integrating Grav Stream needs to read this
+// before they have an account, and putting it behind the dashboard login made
+// it unreadable to exactly the people it is written for.
+import Link from "next/link";
 
 export const metadata = {
   title: "Grav Stream — Integration docs",
+  description:
+    "REST API, room tokens, the embed iframe and postMessage events for integrating Grav Stream screen sharing.",
 };
 
 const PRE =
@@ -139,6 +146,7 @@ const TOC = [
   { id: "embed", label: "Embed the room" },
   { id: "events", label: "Events from the iframe" },
   { id: "errors", label: "Error codes" },
+  { id: "surface-policy", label: "Screen selection & policy" },
   { id: "control", label: "Controlling the iframe" },
   { id: "example", label: "End-to-end example" },
   { id: "usage", label: "Usage & billing data" },
@@ -209,6 +217,27 @@ const ERRORS = [
 export default function DocsPage() {
   return (
     <main className="mx-auto w-full max-w-4xl flex-1 px-6 py-10 font-sans sm:px-8">
+      {/* Public page: readable without an account, so an integrator can
+          evaluate the API before signing up. */}
+      <nav className="mb-8 flex flex-wrap items-center gap-x-5 gap-y-2 text-sm">
+        <Link href="/" className="font-medium hover:underline">
+          &larr; Grav Stream
+        </Link>
+        <span className="text-zinc-300 dark:text-zinc-700">/</span>
+        <span className="text-zinc-500 dark:text-zinc-400">Docs</span>
+        <span className="ml-auto flex items-center gap-4">
+          <Link href="/login" className="text-zinc-600 hover:underline dark:text-zinc-400">
+            Sign in
+          </Link>
+          <Link
+            href="/signup"
+            className="rounded-lg bg-zinc-900 px-3 py-1.5 font-medium text-white hover:bg-zinc-700 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200"
+          >
+            Get an API key
+          </Link>
+        </span>
+      </nav>
+
       <header className="flex flex-col gap-3">
         <p className="text-xs font-medium tracking-wide text-emerald-700 uppercase dark:text-emerald-400">
           Integration guide
@@ -707,6 +736,116 @@ Content-Type: application/json
             whose surface violates the room policy. The{" "}
             <C>ENTIRE_SCREEN_REQUIRED</C> event exists so you can{" "}
             <em>explain</em> the rejection, not to implement it.
+          </Callout>
+        </Section>
+
+        {/* ----------------------------------------------- surface policy */}
+        <Section id="surface-policy" title="Screen selection &amp; policy">
+          <p className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            Grav Stream always <strong>reports</strong> which surface the user
+            picked. Whether a non-conforming pick is <strong>refused</strong> is
+            a separate, per-room choice. These are independent, so you can let
+            your own application decide the rules.
+          </p>
+
+          <Table
+            caption="Reporting versus enforcement"
+            head={["", "requireEntireScreen: true", "requireEntireScreen: false"]}
+            rows={[
+              [
+                "Sharing a window or tab",
+                "Refused by the SFU",
+                "Allowed",
+              ],
+              [
+                "displaySurface reported",
+                "Yes",
+                "Yes — this never changes",
+              ],
+              [
+                "Who decides the rule",
+                "Grav Stream",
+                "Your application",
+              ],
+            ]}
+          />
+
+          <h3 className="text-sm font-semibold">
+            Option A — let Grav Stream enforce it
+          </h3>
+          <p className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            The default for <C>mode: &quot;screen&quot;</C>. A window or tab
+            share never starts, and the user gets{" "}
+            <C>ENTIRE_SCREEN_REQUIRED</C> so you can explain why.
+          </p>
+
+          <h3 className="text-sm font-semibold">
+            Option B — report only, and enforce it yourself
+          </h3>
+          <p className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            Create the room with <C>requireEntireScreen: false</C>. Every
+            surface is accepted and you still receive the full selection, so
+            your product can warn, log, notify a manager, or block — on your own
+            terms.
+          </p>
+          <pre className={PRE}>
+            <code>{`POST /api/v1/rooms
+{ "name": "Alice - workstation", "mode": "screen", "requireEntireScreen": false }
+
+// then, in your frontend:
+window.addEventListener("message", (event) => {
+  if (event.origin !== "https://live.grav.in") return;
+  if (event.data?.source !== "grav-stream") return;
+
+  if (event.data.type === "screen-share-started") {
+    const { displaySurface, width, height } = event.data;
+    if (displaySurface !== "monitor") {
+      flagForManager(employee, displaySurface);   // your policy, not ours
+    }
+  }
+});`}</code>
+          </pre>
+          <p className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            The same value is on{" "}
+            <C>GET /api/v1/rooms/:roomId</C> under{" "}
+            <C>participants[].sharing.screen.displaySurface</C>, so a dashboard
+            can read it server-side without involving the browser.
+          </p>
+
+          <Callout tone="amber" title="Handle displaySurface: null">
+            Not every browser reports the surface. With enforcement{" "}
+            <strong>on</strong>, an unreported surface is refused as{" "}
+            <C>SURFACE_UNKNOWN</C>. With enforcement <strong>off</strong>, the
+            share succeeds and you receive <C>null</C>. Treat that as
+            &ldquo;unverified&rdquo;, not as &ldquo;compliant&rdquo;. Chrome and
+            Edge report it reliably.
+          </Callout>
+
+          <Callout tone="emerald" title="mode and requireEntireScreen are independent">
+            Turning enforcement off does not turn a screen room back into a
+            meeting. <C>mode</C> decides the interface — a{" "}
+            <C>screen</C> room still opens the screen picker and still never
+            asks for a camera or microphone. <C>requireEntireScreen</C> only
+            decides whether a non-display surface is refused.
+          </Callout>
+
+          <h3 className="text-sm font-semibold">Why the check is server-side</h3>
+          <p className="text-sm leading-relaxed text-zinc-600 dark:text-zinc-400">
+            <C>getDisplayMedia({"{ video: { displaySurface: \"monitor\" } }"})</C>{" "}
+            is only a <em>hint</em>. Chrome pre-selects the Entire Screen tab in
+            its picker, but the user can still choose a window or a tab, and
+            nothing in the browser API prevents that. So the selection is
+            verified after capture starts, and the claimed surface is re-checked
+            by the SFU before the producer is created. A modified client that
+            lies about its surface is still refused, because the decision does
+            not happen in the browser.
+          </p>
+
+          <Callout tone="rose" title="What this does not prove">
+            This guarantees the captured surface is a whole display. It cannot
+            tell you what is on that display, detect a virtual machine or a
+            second monitor, or stop someone photographing their screen. Do not
+            present it to end users as more than it is.
           </Callout>
         </Section>
 

@@ -400,35 +400,83 @@ number moves during a live call.
 
 ---
 
-## 7. Enforcing "entire screen only"
+## 7. Screen selection and policy
 
-This is the part most monitoring products get wrong, so it is worth being
-explicit about what is and is not guaranteed.
+Grav Stream always **reports** which surface the user picked. Whether a
+non-conforming pick is **refused** is a separate, per-room choice. The two are
+independent, so your application can own the rules if you prefer.
+
+| | `requireEntireScreen: true` | `requireEntireScreen: false` |
+| --- | --- | --- |
+| Sharing a window or tab | Refused by the SFU | Allowed |
+| `displaySurface` reported | Yes | Yes — this never changes |
+| Who decides the rule | Grav Stream | Your application |
+
+### Option A — let Grav Stream enforce it
+
+The default for `mode: "screen"`. A window or tab share never starts, and the
+user gets `ENTIRE_SCREEN_REQUIRED` so you can explain why.
+
+### Option B — report only, enforce it yourself
+
+Create the room with `requireEntireScreen: false`. Every surface is accepted and
+you still receive the full selection, so your product can warn, log, notify a
+manager, or block on its own terms.
+
+```js
+// POST /api/v1/rooms
+// { "name": "Alice - workstation", "mode": "screen", "requireEntireScreen": false }
+
+window.addEventListener("message", (event) => {
+  if (event.origin !== "https://live.grav.in") return;
+  if (event.data?.source !== "grav-stream") return;
+
+  if (event.data.type === "screen-share-started") {
+    const { displaySurface, width, height } = event.data;
+    if (displaySurface !== "monitor") {
+      flagForManager(employee, displaySurface);   // your policy, not ours
+    }
+  }
+});
+```
+
+The same value is available server-side on `GET /api/v1/rooms/:roomId` under
+`participants[].sharing.screen.displaySurface`, so a dashboard can read it
+without involving the browser at all.
+
+> **Handle `displaySurface: null`.** Not every browser reports the surface. With
+> enforcement **on**, an unreported surface is refused as `SURFACE_UNKNOWN`.
+> With enforcement **off**, the share succeeds and you get `null`. Treat that as
+> *unverified*, not *compliant*. Chrome and Edge report it reliably.
+
+> **`mode` and `requireEntireScreen` are independent.** Turning enforcement off
+> does not turn a screen room back into a meeting. `mode` decides the interface
+> — a `screen` room still opens the screen picker and still never asks for a
+> camera or microphone. `requireEntireScreen` only decides whether a
+> non-display surface is refused.
+
+### Why the check is server-side
 
 `getDisplayMedia({ video: { displaySurface: "monitor" } })` is only a **hint**.
 Chrome pre-selects the Entire Screen tab in its picker, but the user can still
-choose a window or a single browser tab. Nothing in the browser API prevents
-that.
+choose a window or a single tab, and nothing in the browser API prevents that.
 
-So the selection is verified, not requested:
+So the selection is verified rather than requested:
 
 1. The embed reads `track.getSettings().displaySurface` after capture starts.
 2. If the room requires a full display and the user picked otherwise, the embed
    stops the track and reports `ENTIRE_SCREEN_REQUIRED`.
-3. The claimed surface is sent to the server with the publish request, and the
-   **SFU refuses the producer** if it violates the room policy.
+3. The claimed surface travels with the publish request, and the **SFU refuses
+   the producer** if it violates the room policy.
 
-Step 3 is what makes this an actual control: a modified client that lies about
-its surface still gets refused, because the check does not run in the browser.
+Step 3 is what makes this a real control rather than a suggestion: a modified
+client that lies about its surface is still refused, because the decision does
+not happen in the browser.
 
-**Browser support caveat.** If a browser will not report `displaySurface`, the
-policy cannot be verified and the share is refused with `SURFACE_UNKNOWN`.
-Chrome and Edge report it. Set `requireEntireScreen: false` if you need to
-support browsers that do not.
-
-**What this does not do:** it cannot tell you what is *on* the screen, detect a
-virtual display or VM, or stop someone photographing their monitor. It
-guarantees the captured surface is a whole display, nothing more.
+**What this does not prove:** it guarantees the captured surface is a whole
+display. It cannot tell you what is *on* that display, detect a virtual machine
+or a second monitor, or stop someone photographing their screen. Do not present
+it to end users as more than that.
 
 ---
 
