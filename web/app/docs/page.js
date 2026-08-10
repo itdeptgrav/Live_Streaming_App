@@ -6,6 +6,7 @@
 // before they have an account, and putting it behind the dashboard login made
 // it unreadable to exactly the people it is written for.
 import Link from "next/link";
+import ExportMenu from "./ExportMenu";
 
 export const metadata = {
   title: "Grav Stream — Integration docs",
@@ -231,19 +232,7 @@ export default function DocsPage() {
         <span className="text-zinc-300 dark:text-zinc-700">/</span>
         <span className="text-zinc-500 dark:text-zinc-400">Docs</span>
         <span className="ml-auto flex items-center gap-4">
-          {/* Plain-text export of this whole page, for pasting into an AI
-              assistant or handing to another team. */}
-          <a
-            href="/docs/llms.txt"
-            download="grav-stream-docs.txt"
-            className="inline-flex items-center gap-1.5 text-zinc-600 hover:underline dark:text-zinc-400"
-          >
-            <svg viewBox="0 0 16 16" aria-hidden className="h-3.5 w-3.5" fill="currentColor">
-              <path d="M8 1.5a.75.75 0 0 1 .75.75v6.19l1.72-1.72a.75.75 0 1 1 1.06 1.06l-3 3a.75.75 0 0 1-1.06 0l-3-3a.75.75 0 0 1 1.06-1.06l1.72 1.72V2.25A.75.75 0 0 1 8 1.5Z" />
-              <path d="M2.5 10a.75.75 0 0 1 .75.75v1.75h9.5V10.75a.75.75 0 0 1 1.5 0v2.5a.75.75 0 0 1-.75.75H2.75a.75.75 0 0 1-.75-.75v-2.5A.75.75 0 0 1 2.5 10Z" />
-            </svg>
-            Export for AI
-          </a>
+          <ExportMenu />
           <Link href="/login" className="text-zinc-600 hover:underline dark:text-zinc-400">
             Sign in
           </Link>
