@@ -102,6 +102,7 @@ export function listRoomsForUser(userId, { limit = 50 } = {}) {
   return db
     .prepare(
       `SELECT r.room_id, r.name, r.created_at, r.ended_at, r.max_participants,
+              r.mode, r.require_entire_screen,
               (SELECT COUNT(*) FROM usage_sessions u WHERE u.room_id = r.room_id) AS total_participants
          FROM rooms r WHERE r.user_id = ?
         ORDER BY r.created_at DESC LIMIT ?`
@@ -110,6 +111,8 @@ export function listRoomsForUser(userId, { limit = 50 } = {}) {
     .map((r) => ({
       roomId: r.room_id,
       name: r.name,
+      mode: r.mode || "meeting",
+      requireEntireScreen: Boolean(r.require_entire_screen),
       createdAt: r.created_at,
       endedAt: r.ended_at,
       maxParticipants: r.max_participants,
