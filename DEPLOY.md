@@ -1,4 +1,23 @@
-# Deploying KUMKUM
+# Deploying Grav Stream
+
+> **Updating an existing droplet.** To ship new server code:
+>
+> ```bash
+> bash /opt/live-streaming-app/signaling-server/deploy/update.sh
+> ```
+>
+> It installs dependencies, backfills any missing `.env` values, and restarts
+> pm2. **Database migrations run automatically at boot** and are additive only,
+> so accounts, API keys, and usage history survive an update. The database
+> lives in `DATA_DIR` (`/var/lib/grav-stream`), outside the deploy directory,
+> so re-uploading code cannot reach it. Take a snapshot first once you have
+> real users:
+>
+> ```bash
+> sqlite3 /var/lib/grav-stream/platform.db ".backup '/root/platform-$(date +%F).db'"
+> ```
+>
+> Restarting drops anyone connected at that moment; room ids stay valid.
 
 > **Current production deployment (Aug 2026).** The live system runs on a
 > **DigitalOcean droplet with Nginx + pm2**, not the Oracle/Caddy/systemd path

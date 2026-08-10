@@ -166,7 +166,7 @@ only while a screen is actually live, and reports which surface was chosen.
 
 ---
 
-## 3. Embed the meeting
+## 3. Embed the session
 
 ```html
 <iframe
@@ -244,49 +244,119 @@ Supported types: `start-screen-share`, `stop-screen-share`,
 
 ---
 
-## 4. End-to-end example (Node/Express)
+## 4. End-to-end example: screen monitoring (Node/Express)
+
+One durable room per employee. The employee gets a `publisher` token, each
+manager gets a `viewer` token for the same room.
 
 ```js
 const GRAV_API = "https://stream.grav.in";
-const KEY = process.env.GRAV_STREAM_API_KEY;
+const EMBED = "https://live.grav.in";
+const headers = {
+  Authorization: `Bearer ${process.env.GRAV_STREAM_API_KEY}`,
+  "Content-Type": "application/json",
+};
 
-const headers = { Authorization: `Bearer ${KEY}`, "Content-Type": "application/json" };
-
-async function startMeeting(meetTitle) {
-  const res = await fetch(`${GRAV_API}/api/v1/rooms`, {
-    method: "POST",
+async function api(path, body) {
+  const res = await fetch(`${GRAV_API}${path}`, {
+    method: body ? "POST" : "GET",
     headers,
-    body: JSON.stringify({ name: meetTitle, maxParticipants: 30 }),
+    body: body ? JSON.stringify(body) : undefined,
   });
-  if (!res.ok) throw new Error(`create room failed: ${res.status}`);
-  return res.json(); // { roomId }
+  const data = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(data.error || `Grav Stream returned ${res.status}`);
+  return data;
 }
 
-async function joinToken(roomId, user) {
-  const res = await fetch(`${GRAV_API}/api/v1/rooms/${roomId}/tokens`, {
-    method: "POST",
-    headers,
-    body: JSON.stringify({ identity: user.id, name: user.name }),
+// Created once per employee and reused. Rooms survive restarts and periods
+// with nobody connected, so the id can live in your own database.
+async function ensureRoomFor(employee) {
+  if (employee.gravRoomId) return employee.gravRoomId;
+  const room = await api("/api/v1/rooms", {
+    name: `${employee.name} - workstation`,
+    mode: "screen",
+    requireEntireScreen: true,
+    maxParticipants: 10,
   });
-  if (!res.ok) throw new Error(`mint token failed: ${res.status}`);
-  return res.json(); // { token, url, roomId }
+  await db.saveGravRoomId(employee.id, room.roomId);
+  return room.roomId;
 }
 
-app.post("/meetings/:id/join", async (req, res) => {
-  const { roomId } = await startMeeting(req.params.id);
-  const { token } = await joinToken(roomId, req.user);
-  res.json({ roomId, token }); // frontend builds the iframe URL from these
+const embedUrl = (roomId, token) =>
+  `${EMBED}/embed/${roomId}?token=${encodeURIComponent(token)}&parentOrigin=${encodeURIComponent("https://your-app.com")}`;
+
+// The employee goes online and starts sharing.
+app.post("/monitoring/go-online", async (req, res) => {
+  const roomId = await ensureRoomFor(req.user);
+  const { token } = await api(`/api/v1/rooms/${roomId}/tokens`, {
+    identity: req.user.id,
+    name: req.user.name,
+    role: "publisher",
+    ttlSeconds: 9 * 60 * 60, // a working day
+  });
+  res.json({ roomId, embedUrl: embedUrl(roomId, token) });
+});
+
+// A manager opens an employee's live screen.
+app.get("/monitoring/:employeeId/watch", async (req, res) => {
+  if (!req.user.canMonitor) return res.status(403).json({ error: "Forbidden" });
+
+  const employee = await db.getEmployee(req.params.employeeId);
+  const roomId = await ensureRoomFor(employee);
+  const { token } = await api(`/api/v1/rooms/${roomId}/tokens`, {
+    identity: req.user.id,
+    name: req.user.name,
+    role: "viewer", // never prompted for camera or mic
+    ttlSeconds: 3600,
+  });
+  res.json({ embedUrl: embedUrl(roomId, token) });
+});
+
+// Who is actually sharing right now, for a monitoring dashboard.
+app.get("/monitoring/status/:employeeId", async (req, res) => {
+  const employee = await db.getEmployee(req.params.employeeId);
+  if (!employee.gravRoomId) return res.json({ online: false });
+
+  const info = await api(`/api/v1/rooms/${employee.gravRoomId}`);
+  const sharer = info.participants.find((p) => p.sharing.screen);
+  res.json({
+    online: info.live,
+    sharing: Boolean(sharer),
+    surface: sharer?.sharing.screen.displaySurface || null,
+    since: sharer?.sharing.screen.startedAt || null,
+  });
 });
 ```
 
-Frontend:
+Frontend — the whole client integration:
 
 ```jsx
 <iframe
-  src={`https://live.grav.in/embed/${roomId}?token=${token}`}
+  src={embedUrl}
   allow="camera; microphone; display-capture; autoplay"
   style={{ width: "100%", height: "100%", border: 0 }}
 />
+```
+
+> **`allow` is mandatory.** Without it the browser blocks screen capture inside
+> the frame and the user gets an error instead of a picker. This is the single
+> most common integration mistake.
+
+Reacting to what the employee picked:
+
+```js
+window.addEventListener("message", (event) => {
+  if (event.origin !== "https://live.grav.in") return;
+  if (event.data?.source !== "grav-stream") return;
+
+  if (event.data.type === "screen-share-started") {
+    const { displaySurface, width, height } = event.data;
+    console.log(`sharing ${displaySurface} at ${width}x${height}`);
+  }
+  if (event.data.type === "error" && event.data.code === "ENTIRE_SCREEN_REQUIRED") {
+    showBanner("Please share your entire screen, not a single window or tab.");
+  }
+});
 ```
 
 ---
@@ -330,7 +400,39 @@ number moves during a live call.
 
 ---
 
-## 7. Operational notes
+## 7. Enforcing "entire screen only"
+
+This is the part most monitoring products get wrong, so it is worth being
+explicit about what is and is not guaranteed.
+
+`getDisplayMedia({ video: { displaySurface: "monitor" } })` is only a **hint**.
+Chrome pre-selects the Entire Screen tab in its picker, but the user can still
+choose a window or a single browser tab. Nothing in the browser API prevents
+that.
+
+So the selection is verified, not requested:
+
+1. The embed reads `track.getSettings().displaySurface` after capture starts.
+2. If the room requires a full display and the user picked otherwise, the embed
+   stops the track and reports `ENTIRE_SCREEN_REQUIRED`.
+3. The claimed surface is sent to the server with the publish request, and the
+   **SFU refuses the producer** if it violates the room policy.
+
+Step 3 is what makes this an actual control: a modified client that lies about
+its surface still gets refused, because the check does not run in the browser.
+
+**Browser support caveat.** If a browser will not report `displaySurface`, the
+policy cannot be verified and the share is refused with `SURFACE_UNKNOWN`.
+Chrome and Edge report it. Set `requireEntireScreen: false` if you need to
+support browsers that do not.
+
+**What this does not do:** it cannot tell you what is *on* the screen, detect a
+virtual display or VM, or stop someone photographing their monitor. It
+guarantees the captured surface is a whole display, nothing more.
+
+---
+
+## 8. Operational notes
 
 - Media (RTP) flows directly between browsers and `stream.grav.in` on UDP
   40000–49999 — it does **not** pass through Nginx. Those ports must stay open.
