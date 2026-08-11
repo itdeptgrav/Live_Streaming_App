@@ -18,6 +18,11 @@ server {
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
-        proxy_read_timeout 3600s;
+        # The server pings every 25s so an idle signaling socket is never
+        # actually silent, but a long screen share should not depend on that
+        # alone — a day-long ceiling costs nothing and removes the failure mode
+        # where a share simply stops after an hour with no error.
+        proxy_read_timeout 86400s;
+        proxy_send_timeout 86400s;
     }
 }

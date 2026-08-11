@@ -374,6 +374,32 @@ On the client, <LiveKitRoom> + <VideoConference /> and any imperative
 new Room().connect() are replaced by the iframe. livekit-client,
 @livekit/components-react and @livekit/components-styles can be removed.
 
+## Quality, CPU and long sessions
+
+Defaults are tuned for screen text rather than motion video. You should not
+need to change any of this.
+
+- Capture is capped at 1920x1080. A 1440p or 4K desktop otherwise gets the same
+  bitrate spread across several times the pixels — which is what makes small
+  text unreadable — and costs the same multiple in encoder CPU.
+- contentHint is "detail" and scaleResolutionDownBy is pinned to 1, so under
+  bandwidth pressure the encoder drops frames instead of resolution. Text stays
+  sharp; motion gets choppier. That is the right trade for a desktop.
+- H.264 is offered ahead of VP8. Almost every machine has a hardware H.264
+  encoder, while VP8 encodes in software — the difference between a responsive
+  machine and one that reports "not responding" while sharing.
+- Bitrate starts at 3 Mbps rather than climbing from a low estimate, so the
+  first seconds of a share are already readable.
+- The signaling socket is pinged every 25 seconds. Media travels over UDP, so
+  the socket would otherwise sit silent and be closed by an idle proxy timeout,
+  ending a long share with no error. A full working day is fine.
+
+An SFU sends one copy of a stream per watcher, so a sharer's upload cost does
+not grow with the number of people watching — their machine encodes once
+regardless. If a sharer is still struggling, look for another application
+competing for CPU, or a very high refresh-rate display; reduce the frame rate
+before raising the bitrate.
+
 ## Operational notes
 
 - Media (RTP) flows directly between browsers and the SFU on UDP 40000-49999.

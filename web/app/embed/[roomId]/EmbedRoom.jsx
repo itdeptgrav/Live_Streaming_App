@@ -168,8 +168,12 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
           displaySurface: capture.displaySurface,
           width: capture.width,
           height: capture.height,
-          encodings: [{ maxBitrate: 3_000_000 }],
-          codecOptions: { videoGoogleStartBitrate: 1000 },
+          // scaleResolutionDownBy: 1 forbids the encoder from quietly halving
+          // the resolution when bandwidth tightens. For a camera that is a
+          // sensible trade; for text it is the difference between readable and
+          // not, so drop frames instead — which contentHint "detail" asks for.
+          encodings: [{ maxBitrate: 4_000_000, scaleResolutionDownBy: 1 }],
+          codecOptions: { videoGoogleStartBitrate: 1500 },
         });
       } catch (err) {
         stream.getTracks().forEach((t) => t.stop());

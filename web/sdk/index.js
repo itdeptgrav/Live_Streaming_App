@@ -115,7 +115,7 @@ export async function share({
   token,
   serverUrl,
   requireEntireScreen = false,
-  maxBitrate = 3_000_000,
+  maxBitrate = 4_000_000,
 } = {}) {
   if (!token) throw new GravStreamError("TOKEN_REQUIRED", "A room token is required.");
 
@@ -146,7 +146,16 @@ export async function share({
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
-      video: { displaySurface: "monitor", frameRate: { ideal: 15, max: 30 } },
+      video: {
+        displaySurface: "monitor",
+        // Cap at 1080p. A 1440p or 4K desktop captured at full size gets the
+        // same bitrate spread over four times the pixels, which is what makes
+        // small text unreadable — and it costs the encoder the same multiple
+        // in CPU, which is what makes the sharer's machine stop responding.
+        width: { max: 1920 },
+        height: { max: 1080 },
+        frameRate: { ideal: 15, max: 30 },
+      },
       audio: false,
       monitorTypeSurfaces: "include",
       selfBrowserSurface: "exclude",
@@ -279,8 +288,11 @@ export async function share({
 
     const producer = await sendTransport.produce({
       track,
-      encodings: [{ maxBitrate }],
-      codecOptions: { videoGoogleStartBitrate: 1000 },
+      // scaleResolutionDownBy: 1 forbids the encoder from quietly halving the
+      // resolution under pressure. For text that is the difference between
+      // readable and not, so drop frames instead.
+      encodings: [{ maxBitrate, scaleResolutionDownBy: 1 }],
+      codecOptions: { videoGoogleStartBitrate: 1500 },
       appData: {
         source: "screen",
         displaySurface: capture.displaySurface,

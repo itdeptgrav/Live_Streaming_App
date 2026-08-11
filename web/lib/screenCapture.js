@@ -65,6 +65,14 @@ export async function captureScreen({ requireEntireScreen = false } = {}) {
         // A hint only. Chrome pre-selects the Entire Screen tab; it does not
         // prevent the user from choosing a window or tab instead.
         displaySurface: "monitor",
+        // Cap the capture at 1080p. Without this a 1440p or 4K desktop is
+        // captured at full size and then squeezed into the same bitrate, which
+        // is what turned small text into mush — a 4K frame has four times the
+        // pixels of 1080p and got the same bits to describe them. It also cuts
+        // the encoder's workload by the same factor, which is the difference
+        // between a responsive machine and one that stops responding.
+        width: { max: 1920 },
+        height: { max: 1080 },
         frameRate: { ideal: 15, max: 30 },
       },
       audio: false,

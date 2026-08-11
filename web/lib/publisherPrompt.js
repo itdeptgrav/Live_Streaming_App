@@ -141,6 +141,26 @@ In a screen room the watcher's iframe shows the shared screen edge to edge with
 no border, no name label and no controls, so it can be dropped into your own
 panel without fighting your layout.
 
+## Quality and long sessions — already handled, do not re-implement
+
+The SDK sets these for you. Do not override them unless you have measured a
+reason to:
+
+- Capture is capped at 1920x1080. A 1440p or 4K desktop otherwise gets the same
+  bitrate spread over several times the pixels, which is what makes small text
+  unreadable, and costs the same multiple in CPU.
+- contentHint is "detail" and the encoder is told not to reduce resolution, so
+  under pressure it drops frames rather than sharpness. Text stays legible.
+- H.264 is preferred over VP8, because nearly every machine has a hardware
+  H.264 encoder and VP8 is software-only. This is the difference between a
+  responsive machine and one that reports "not responding".
+- The signaling socket is kept alive with a server-side ping, so a share that
+  runs for a full working day is not cut off by an idle timeout.
+
+If a sharer's machine is still struggling, the cause is usually another
+application competing for CPU, or a very high refresh-rate display. Lower the
+frame rate by passing your own constraint rather than raising the bitrate.
+
 ## Full reference
 
 https://live.grav.in/docs/llms.txt

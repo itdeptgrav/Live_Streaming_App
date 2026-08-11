@@ -85,7 +85,39 @@ const httpServer = http.createServer(async (req, res) => {
 
 const wss = new WebSocketServer({ server: httpServer });
 
+// Once media is flowing the signaling socket can sit silent for hours — media
+// travels over UDP, not through here. Nginx closes an idle proxied connection
+// after proxy_read_timeout, so a long screen share was being cut off with no
+// error to explain it. A periodic ping keeps the connection accounted for and
+// also detects peers that vanished without a close frame.
+const HEARTBEAT_MS = 25_000;
+
+const heartbeat = setInterval(() => {
+  for (const ws of wss.clients) {
+    if (ws.isAlive === false) {
+      ws.terminate();
+      continue;
+    }
+    ws.isAlive = false;
+    try {
+      ws.ping();
+    } catch {
+      // Terminating here would mutate the set mid-iteration; the next sweep
+      // catches it via isAlive.
+    }
+  }
+}, HEARTBEAT_MS);
+
+wss.on("close", () => clearInterval(heartbeat));
+
 wss.on("connection", (ws) => {
+  ws.isAlive = true;
+  // Browsers answer protocol-level pings automatically, so nothing is needed
+  // on the client for this to work.
+  ws.on("pong", () => {
+    ws.isAlive = true;
+  });
+
   ws.meta = { mode: null, role: null, roomId: null, viewerId: null, peerId: null, usageId: null };
 
   ws.on("message", async (raw) => {
@@ -533,9 +565,14 @@ async function handleMeetMessage(ws, msg) {
           // RtpStreamRecv may not exist yet, in which case requestKeyFrame() is
           // a silent no-op. Camera video hides this (motion forces frequent
           // keyframes); a static screen share does not, and stays black
-          // forever. Stagger a few retries, and let the client ask again via
-          // meet-request-keyframe if its <video> is still 0x0.
-          for (const delay of [0, 400, 1200, 3000]) {
+          // forever.
+          //
+          // Two attempts, not four. Every keyframe is a full intra frame that
+          // the sharer's encoder has to produce and that eats the bitrate
+          // budget detail would otherwise get — with several watchers the
+          // duplicates were costing real CPU and sharpness. The client still
+          // asks via meet-request-keyframe if its <video> is genuinely blank.
+          for (const delay of [0, 1200]) {
             setTimeout(() => {
               if (!consumer.closed) consumer.requestKeyFrame().catch(() => {});
             }, delay);
