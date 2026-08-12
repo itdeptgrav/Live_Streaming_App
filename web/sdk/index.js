@@ -63,10 +63,14 @@ class Session {
     this.capture = capture;
     this.roomId = roomId;
     this.active = true;
+    // True while nobody is subscribed. The share is still established; the
+    // encoder is simply not being asked to do anything.
+    this.idle = false;
+    this.watchers = 0;
     this._handlers = {};
   }
 
-  /** on("ended" | "error", handler) */
+  /** on("ended" | "watchers", handler) */
   on(event, handler) {
     (this._handlers[event] ||= []).push(handler);
     return this;
@@ -230,8 +234,27 @@ export async function share({
     joined = { resolve, reject };
   });
 
+  // Assigned once the session exists; the socket starts receiving before then.
+  let live = null;
+
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
+
+    // Nobody is watching, so stop encoding. A monitored screen is looked at
+    // for a few minutes an hour; the rest of the time the sharer's machine
+    // should be left alone rather than encoding frames nobody receives.
+    if (msg.type === "meet-producer-demand" && live && msg.producerId === live._producer?.id) {
+      live.watchers = msg.watchers;
+      const shouldPause = msg.watchers === 0;
+      try {
+        if (shouldPause && !live._producer.paused) live._producer.pause();
+        else if (!shouldPause && live._producer.paused) live._producer.resume();
+        live.idle = shouldPause;
+      } catch {}
+      live._emit("watchers", { watchers: msg.watchers, idle: live.idle });
+      return;
+    }
+
     if (msg.rid && pending.has(msg.rid)) {
       const p = pending.get(msg.rid);
       if (msg.type === "error") p.reject(new GravStreamError(msg.code || "SERVER_ERROR", msg.message));
@@ -312,6 +335,7 @@ export async function share({
       capture,
       roomId,
     });
+    live = session;
 
     // The browser's own "Stop sharing" bar ends the track without telling us.
     track.onended = () => session.stop();

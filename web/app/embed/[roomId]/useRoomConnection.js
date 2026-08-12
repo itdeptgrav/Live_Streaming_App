@@ -30,6 +30,8 @@ export function useRoomConnection({ roomId, token, onEvent }) {
   const remoteAudiosRef = useRef(new Map());
   const peersRef = useRef(new Map());
 
+  // producerId -> Producer, so a demand notice can find the right one.
+  const producersRef = useRef(new Map());
   const consumeQueueRef = useRef(Promise.resolve());
   const pendingRef = useRef(new Map());
   const ridRef = useRef(0);
@@ -307,6 +309,23 @@ export function useRoomConnection({ roomId, token, onEvent }) {
                   emit.current?.("participant-joined", { identity: msg.identity, name: msg.name });
                   break;
 
+                // Nobody is subscribed, so there is no point encoding. This is
+                // the single biggest saving for a monitoring session: a screen
+                // is watched for minutes out of every hour, and the rest of the
+                // time the sharer's machine can be left alone.
+                case "meet-producer-demand": {
+                  const producer = producersRef.current.get(msg.producerId);
+                  if (producer && !producer.closed) {
+                    if (msg.watchers > 0 && producer.paused) producer.resume();
+                    else if (msg.watchers === 0 && !producer.paused) producer.pause();
+                  }
+                  emit.current?.("watchers-changed", {
+                    producerId: msg.producerId,
+                    watchers: msg.watchers,
+                  });
+                  break;
+                }
+
                 case "meet-media-state": {
                   const peer = peersRef.current.get(msg.peerId);
                   if (peer) {
@@ -354,18 +373,21 @@ export function useRoomConnection({ roomId, token, onEvent }) {
 
   const publish = useCallback(async ({ track, source, displaySurface, width, height, encodings, codecOptions }) => {
     if (!sendTransportRef.current) throw new Error("This session cannot publish");
-    return sendTransportRef.current.produce({
+    const producer = await sendTransportRef.current.produce({
       track,
       stopTracks: source !== "screen",
       encodings,
       codecOptions,
       appData: { source, displaySurface, width, height },
     });
+    producersRef.current.set(producer.id, producer);
+    return producer;
   }, []);
 
   const unpublish = useCallback(
     (producer) => {
       if (!producer) return;
+      producersRef.current.delete(producer.id);
       send({ type: "meet-close-producer", producerId: producer.id });
       try {
         producer.close();

@@ -156,6 +156,8 @@ wss.on("connection", (ws) => {
         for (const peer of room.peers.values()) {
           send(peer.ws, { type: "meet-peer-left", peerId: ws.meta.peerId });
         }
+        // Their consumers went with them, so someone may now have no audience.
+        notifyDemand(room);
       }
       return;
     }
@@ -445,6 +447,7 @@ async function handleMeetMessage(ws, msg) {
       );
 
       send(ws, { type: "meet-produced", rid: msg.rid, producerId: producer.id });
+      notifyDemand(room);
 
       for (const [otherId, otherPeer] of room.peers) {
         if (otherId === ws.meta.peerId) continue;
@@ -536,6 +539,7 @@ async function handleMeetMessage(ws, msg) {
         paused: true,
       });
       peer.consumers.set(consumer.id, consumer);
+      notifyDemand(room);
       console.log(
         `[meet] peer ${ws.meta.peerId} created ${consumer.kind} consumer ${consumer.id} for producer ${msg.producerId}`
       );
@@ -602,6 +606,8 @@ async function handleMeetMessage(ws, msg) {
         for (const peer of room.peers.values()) {
           send(peer.ws, { type: "meet-peer-left", peerId: ws.meta.peerId });
         }
+        // Their consumers went with them, so someone may now have no audience.
+        notifyDemand(room);
       }
       break;
     }
@@ -636,6 +642,33 @@ function rehydrateRoom(roomId) {
     mode: record.mode || "meeting",
     requireEntireScreen: Boolean(record.require_entire_screen),
   });
+}
+
+/**
+ * Tells each publisher how many people are actually watching each of its
+ * tracks, so it can stop encoding when nobody is.
+ *
+ * This is the difference between an employee's machine working all day and
+ * working only while a manager is looking. A monitoring session is watched for
+ * a few minutes out of every hour, but the browser was encoding and uploading
+ * continuously regardless — burning CPU on their machine and bandwidth on ours
+ * to produce frames nobody received.
+ */
+function notifyDemand(room) {
+  for (const [peerId, peer] of room.peers) {
+    for (const producerId of peer.producers.keys()) {
+      let watchers = 0;
+      for (const [otherId, otherPeer] of room.peers) {
+        if (otherId === peerId) continue;
+        for (const consumer of otherPeer.consumers.values()) {
+          if (consumer.producerId === producerId && !consumer.closed) watchers++;
+        }
+      }
+      if (peer.demand?.get(producerId) === watchers) continue;
+      (peer.demand ||= new Map()).set(producerId, watchers);
+      send(peer.ws, { type: "meet-producer-demand", producerId, watchers });
+    }
+  }
 }
 
 /** Which peer owns a producer — lets clients attribute a track to a participant. */
