@@ -747,10 +747,41 @@ function notifyDemand(room) {
           if (consumer.producerId === producerId && !consumer.closed) watchers++;
         }
       }
-      if (peer.demand?.get(producerId) === watchers) continue;
+      const previous = peer.demand?.get(producerId);
+      if (previous === watchers) continue;
       (peer.demand ||= new Map()).set(producerId, watchers);
       send(peer.ws, { type: "meet-producer-demand", producerId, watchers });
+
+      // Waking a paused producer needs a keyframe, and the obvious moment to
+      // ask for one is too early: the consumer resumes while the producer is
+      // still paused, so that request produces nothing, and the publisher
+      // resumes a beat later with nobody asking again. A static desktop may not
+      // emit a keyframe of its own accord for minutes, which is exactly the
+      // "still sharing but the watcher sees black" report.
+      if (watchers > 0 && (previous === 0 || previous === undefined)) {
+        requestKeyFramesFor(room, producerId);
+      }
     }
+  }
+}
+
+/**
+ * Nudges every consumer of a producer for a fresh keyframe, staggered because
+ * the publisher needs a moment to actually resume before it can encode one.
+ */
+function requestKeyFramesFor(room, producerId) {
+  for (const delay of [250, 1000, 2500]) {
+    setTimeout(() => {
+      const current = getMeetRoom(room.id);
+      if (!current) return;
+      for (const peer of current.peers.values()) {
+        for (const consumer of peer.consumers.values()) {
+          if (consumer.producerId === producerId && !consumer.closed) {
+            consumer.requestKeyFrame().catch(() => {});
+          }
+        }
+      }
+    }, delay).unref?.();
   }
 }
 

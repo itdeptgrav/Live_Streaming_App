@@ -982,26 +982,55 @@ function RemoteVideo({ track, label, badge, accent, compact, contain, bare, clas
     video.srcObject = track.stream;
     video.play().catch(() => setBlocked(true));
 
-    // A consumer created paused only receives deltas once resumed, and a static
-    // screen can go minutes without emitting a keyframe. videoWidth is the only
-    // reliable proof frames decoded — play() can stay pending forever — so poll
-    // it and nudge the SFU until something lands.
+    // Two failures to recover from, and they are not the same.
+    //
+    // A stream that never starts: a consumer created paused only receives
+    // deltas once resumed, and a static screen can go minutes without emitting
+    // a keyframe of its own. videoWidth is the only reliable proof frames
+    // decoded, since play() can stay pending forever.
+    //
+    // A stream that starts and then freezes: the previous version stopped
+    // watching the moment the first frame arrived, so a picture that went
+    // black an hour into a session was never recovered — the watcher just sat
+    // looking at nothing while the sharer was still sharing. Frozen video keeps
+    // its last videoWidth, so the signal there is currentTime no longer
+    // advancing.
     let tries = 0;
+    let lastTime = -1;
+    let stalled = 0;
+
     const timer = setInterval(() => {
       const v = ref.current;
       if (!v) return;
-      if (v.videoWidth > 0) {
-        setBlocked(false);
-        clearInterval(timer);
+
+      if (v.videoWidth === 0) {
+        if (++tries > 15) return;
+        requestKeyFrame(track.consumerId);
+        v.play().catch(() => {});
         return;
       }
-      if (++tries > 10) {
-        clearInterval(timer);
-        return;
+
+      // Frames have decoded at least once.
+      setBlocked(false);
+      tries = 0;
+
+      const live = track.stream.getVideoTracks()[0]?.readyState === "live";
+      if (!live) return;
+
+      if (v.currentTime === lastTime) {
+        // Two quiet ticks before acting: a screen with nothing happening is
+        // normal, and asking for a keyframe every three seconds would put real
+        // load back on the sharer for no reason.
+        if (++stalled >= 2) {
+          stalled = 0;
+          requestKeyFrame(track.consumerId);
+          v.play().catch(() => {});
+        }
+      } else {
+        stalled = 0;
+        lastTime = v.currentTime;
       }
-      requestKeyFrame(track.consumerId);
-      v.play().catch(() => {});
-    }, 1500);
+    }, 3000);
 
     return () => clearInterval(timer);
   }, [track.stream, track.consumerId, requestKeyFrame]);
