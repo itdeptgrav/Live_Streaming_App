@@ -131,12 +131,169 @@ export function openUsageSession({ userId, roomId, peerId, identity, displayName
   return id;
 }
 
-export function closeUsageSession(usageId) {
+export function closeUsageSession(usageId, { bytesSent = null, bytesReceived = null } = {}) {
   if (!usageId) return;
-  db.prepare("UPDATE usage_sessions SET left_at = ? WHERE id = ? AND left_at IS NULL").run(
-    Date.now(),
-    usageId
-  );
+  db.prepare(
+    `UPDATE usage_sessions
+        SET left_at = ?, bytes_sent = ?, bytes_received = ?
+      WHERE id = ? AND left_at IS NULL`
+  ).run(Date.now(), bytesSent, bytesReceived, usageId);
+}
+
+// ---------------- media telemetry ----------------
+
+export function recordMediaSample(sample) {
+  db.prepare(
+    `INSERT INTO media_samples
+       (id, user_id, room_id, peer_id, identity, at, role, source, codec, encoder,
+        hardware, width, height, fps, kbps, limited_by, frames_sent, frames_dropped,
+        packets_lost, rtt_ms, paused, watchers)
+     VALUES (@id, @userId, @roomId, @peerId, @identity, @at, @role, @source, @codec,
+             @encoder, @hardware, @width, @height, @fps, @kbps, @limitedBy,
+             @framesSent, @framesDropped, @packetsLost, @rttMs, @paused, @watchers)`
+  ).run({
+    id: newId("smp"),
+    at: Date.now(),
+    userId: sample.userId,
+    roomId: sample.roomId,
+    peerId: sample.peerId,
+    identity: sample.identity ?? null,
+    role: sample.role ?? null,
+    source: sample.source ?? null,
+    codec: sample.codec ?? null,
+    encoder: sample.encoder ?? null,
+    hardware: sample.hardware == null ? null : sample.hardware ? 1 : 0,
+    width: sample.width ?? null,
+    height: sample.height ?? null,
+    fps: sample.fps ?? null,
+    kbps: sample.kbps ?? null,
+    limitedBy: sample.limitedBy ?? null,
+    framesSent: sample.framesSent ?? null,
+    framesDropped: sample.framesDropped ?? null,
+    packetsLost: sample.packetsLost ?? null,
+    rttMs: sample.rttMs ?? null,
+    paused: sample.paused ? 1 : 0,
+    watchers: sample.watchers ?? null,
+  });
+}
+
+/**
+ * The picture that answers "why is it slow": which codecs are in play, how
+ * often machines rather than networks are the constraint, and how much data
+ * actually moved.
+ */
+export function analyticsSummary(userId, { sinceMs } = {}) {
+  const since = sinceMs ?? Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+  const codecs = db
+    .prepare(
+      `SELECT COALESCE(codec, 'unknown') AS codec,
+              COALESCE(encoder, 'unknown') AS encoder,
+              SUM(CASE WHEN hardware = 1 THEN 1 ELSE 0 END) AS hardware_samples,
+              COUNT(*) AS samples,
+              COUNT(DISTINCT peer_id) AS peers
+         FROM media_samples
+        WHERE user_id = ? AND at >= ?
+        GROUP BY codec, encoder
+        ORDER BY samples DESC`
+    )
+    .all(userId, since);
+
+  const limits = db
+    .prepare(
+      `SELECT COALESCE(limited_by, 'unknown') AS reason, COUNT(*) AS samples
+         FROM media_samples
+        WHERE user_id = ? AND at >= ?
+        GROUP BY reason ORDER BY samples DESC`
+    )
+    .all(userId, since);
+
+  const quality = db
+    .prepare(
+      `SELECT ROUND(AVG(fps), 1) AS avg_fps,
+              ROUND(AVG(kbps)) AS avg_kbps,
+              MAX(width || 'x' || height) AS max_resolution,
+              SUM(frames_dropped) AS frames_dropped,
+              SUM(packets_lost) AS packets_lost,
+              ROUND(AVG(rtt_ms)) AS avg_rtt_ms,
+              SUM(CASE WHEN paused = 1 THEN 1 ELSE 0 END) AS idle_samples,
+              COUNT(*) AS samples
+         FROM media_samples
+        WHERE user_id = ? AND at >= ?`
+    )
+    .get(userId, since);
+
+  const bandwidth = db
+    .prepare(
+      `SELECT COALESCE(SUM(bytes_sent), 0) AS bytes_sent,
+              COALESCE(SUM(bytes_received), 0) AS bytes_received
+         FROM usage_sessions
+        WHERE user_id = ? AND joined_at >= ?`
+    )
+    .get(userId, since);
+
+  return {
+    since,
+    codecs: codecs.map((c) => ({
+      codec: c.codec,
+      encoder: c.encoder,
+      // Software encoding is the usual explanation for a pinned CPU, so it is
+      // called out rather than left to be inferred from the encoder name.
+      hardware: c.hardware_samples > 0,
+      samples: c.samples,
+      peers: c.peers,
+    })),
+    limitedBy: Object.fromEntries(limits.map((l) => [l.reason, l.samples])),
+    quality: {
+      avgFps: quality.avg_fps,
+      avgKbps: quality.avg_kbps,
+      maxResolution: quality.max_resolution,
+      framesDropped: quality.frames_dropped,
+      packetsLost: quality.packets_lost,
+      avgRttMs: quality.avg_rtt_ms,
+      // How much of the time publishers were idle because nobody was watching.
+      idleShare: quality.samples ? Math.round((quality.idle_samples / quality.samples) * 100) : 0,
+      samples: quality.samples,
+    },
+    bandwidth: {
+      bytesSent: bandwidth.bytes_sent,
+      bytesReceived: bandwidth.bytes_received,
+      gbSent: +(bandwidth.bytes_sent / 1e9).toFixed(2),
+      gbReceived: +(bandwidth.bytes_received / 1e9).toFixed(2),
+    },
+  };
+}
+
+/** Most recent sample per peer — what each machine is doing right now. */
+export function latestSamplesForRoom(roomId, limit = 50) {
+  return db
+    .prepare(
+      `SELECT peer_id, identity, at, source, codec, encoder, hardware, width, height,
+              fps, kbps, limited_by, frames_dropped, packets_lost, rtt_ms, paused, watchers
+         FROM media_samples m
+        WHERE room_id = ?
+          AND at = (SELECT MAX(at) FROM media_samples WHERE peer_id = m.peer_id)
+        ORDER BY at DESC LIMIT ?`
+    )
+    .all(roomId, limit)
+    .map((r) => ({
+      peerId: r.peer_id,
+      identity: r.identity,
+      at: r.at,
+      source: r.source,
+      codec: r.codec,
+      encoder: r.encoder,
+      hardware: r.hardware === null ? null : Boolean(r.hardware),
+      resolution: r.width && r.height ? `${r.width}x${r.height}` : null,
+      fps: r.fps,
+      kbps: r.kbps,
+      limitedBy: r.limited_by,
+      framesDropped: r.frames_dropped,
+      packetsLost: r.packets_lost,
+      rttMs: r.rtt_ms,
+      paused: Boolean(r.paused),
+      watchers: r.watchers,
+    }));
 }
 
 /**

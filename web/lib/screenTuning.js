@@ -80,3 +80,55 @@ export function negotiatedCodec(producer) {
     return null;
   }
 }
+
+/**
+ * Reads the encoder's own account of what it is doing.
+ *
+ * Everything here is invisible to the server: the negotiated codec, whether
+ * the encoder is hardware, and whether the machine or the network is the
+ * limiting factor all live in the browser. Reporting it is the difference
+ * between diagnosing a slow session and guessing at it.
+ */
+export async function readEncoderStats(producer) {
+  const sender = producer?.rtpSender;
+  if (!sender?.getStats) return null;
+
+  let report;
+  try {
+    report = await sender.getStats();
+  } catch {
+    return null;
+  }
+
+  let out = null;
+  let remote = null;
+  const codecs = new Map();
+  report.forEach((s) => {
+    if (s.type === "codec") codecs.set(s.id, s.mimeType);
+    if (s.type === "outbound-rtp" && s.kind === "video") out = s;
+    if (s.type === "remote-inbound-rtp" && s.kind === "video") remote = s;
+  });
+  if (!out) return null;
+
+  return {
+    codec: (codecs.get(out.codecId) || "").replace(/^video\//i, "") || null,
+    // A vendor name or "ExternalEncoder" means hardware; "libvpx" and
+    // "OpenH264" mean software, and a pinned CPU.
+    encoder: out.encoderImplementation || null,
+    hardware: out.powerEfficientEncoder ?? null,
+    width: out.frameWidth ?? null,
+    height: out.frameHeight ?? null,
+    fps: out.framesPerSecond ?? null,
+    kbps: out.targetBitrate ? Math.round(out.targetBitrate / 1000) : null,
+    // "cpu" means the machine cannot keep up; "bandwidth" means the network.
+    limitedBy: out.qualityLimitationReason ?? null,
+    framesSent: out.framesSent ?? null,
+    framesDropped: out.framesDropped ?? null,
+    packetsLost: remote?.packetsLost ?? null,
+    rttMs: remote?.roundTripTime != null ? Math.round(remote.roundTripTime * 1000) : null,
+    paused: Boolean(producer.paused),
+  };
+}
+
+/** How often a publisher reports in. Cheap enough to be continuous. */
+export const STATS_INTERVAL_MS = 30_000;

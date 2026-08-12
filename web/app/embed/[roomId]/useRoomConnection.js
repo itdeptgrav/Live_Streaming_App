@@ -401,6 +401,8 @@ export function useRoomConnection({ roomId, token, onEvent }) {
     [send]
   );
 
+  const reportStats = useCallback((stats) => send({ type: "meet-stats", ...stats }), [send]);
+
   const requestKeyFrame = useCallback((consumerId) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "meet-request-keyframe", consumerId }));
@@ -450,6 +452,7 @@ export function useRoomConnection({ roomId, token, onEvent }) {
     publish,
     unpublish,
     reportMediaState,
+    reportStats,
     requestKeyFrame,
     disconnect,
   };

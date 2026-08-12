@@ -13,7 +13,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { readRoomTokenClaims, surfaceLabel } from "@/lib/roomToken";
 import { resolveEmbedUi } from "@/lib/embedOptions";
 import { captureScreen } from "@/lib/screenCapture";
-import { screenEncodings, SCREEN_CODEC_OPTIONS, preferSharpness, negotiatedCodec } from "@/lib/screenTuning";
+import {
+  screenEncodings,
+  SCREEN_CODEC_OPTIONS,
+  preferSharpness,
+  negotiatedCodec,
+  readEncoderStats,
+  STATS_INTERVAL_MS,
+} from "@/lib/screenTuning";
 import { useRoomConnection } from "./useRoomConnection";
 
 const CHANNEL = "grav-stream";
@@ -45,6 +52,7 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
     publish,
     unpublish,
     reportMediaState,
+    reportStats,
     requestKeyFrame,
     disconnect,
   } = room;
@@ -134,6 +142,21 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
     autoJoinedRef.current = true;
     startSession();
   }, [token, phase, startSession]);
+
+  // Periodic encoder telemetry while a screen is live. Same data the SDK
+  // reports, so a session started either way is equally diagnosable.
+  useEffect(() => {
+    if (phase !== "live" || !sharing) return;
+    let cancelled = false;
+    const timer = setInterval(async () => {
+      const stats = await readEncoderStats(screenProducerRef.current);
+      if (stats && !cancelled) reportStats({ source: "screen", ...stats });
+    }, STATS_INTERVAL_MS);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [phase, sharing, reportStats]);
 
   useEffect(() => {
     if (phase !== "live") return;

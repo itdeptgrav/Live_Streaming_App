@@ -97,6 +97,56 @@ addColumnIfMissing("rooms", "mode", "TEXT NOT NULL DEFAULT 'meeting'");
 // When set, publishers must share a whole display — not a window or a tab.
 addColumnIfMissing("rooms", "require_entire_screen", "INTEGER NOT NULL DEFAULT 0");
 
+// Bandwidth actually moved, recorded when a peer disconnects. This is the
+// number that maps to the hosting bill, and it cannot be derived from duration
+// alone because a paused producer costs nothing.
+addColumnIfMissing("usage_sessions", "bytes_sent", "INTEGER");
+addColumnIfMissing("usage_sessions", "bytes_received", "INTEGER");
+
+// What the browser reports about its own encoder, sampled periodically.
+//
+// The server cannot see any of this: which codec was negotiated, whether the
+// encoder is hardware, and whether the machine or the network is the
+// constraint all live in the client. Without it, diagnosing "it is slow"
+// depends on asking someone to read numbers back over chat.
+db.exec(`
+CREATE TABLE IF NOT EXISTS media_samples (
+  id             TEXT PRIMARY KEY,
+  user_id        TEXT NOT NULL,
+  room_id        TEXT NOT NULL,
+  peer_id        TEXT NOT NULL,
+  identity       TEXT,
+  at             INTEGER NOT NULL,
+  role           TEXT,
+  source         TEXT,
+  codec          TEXT,
+  encoder        TEXT,
+  hardware       INTEGER,
+  width          INTEGER,
+  height         INTEGER,
+  fps            REAL,
+  kbps           INTEGER,
+  limited_by     TEXT,
+  frames_sent    INTEGER,
+  frames_dropped INTEGER,
+  packets_lost   INTEGER,
+  rtt_ms         REAL,
+  paused         INTEGER,
+  watchers       INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_samples_user_time ON media_samples(user_id, at);
+CREATE INDEX IF NOT EXISTS idx_samples_room ON media_samples(room_id, at);
+`);
+
+// Samples arrive every 30s per publisher, so they would grow without bound on
+// a 512 MB box. Two weeks is long enough to investigate a complaint and short
+// enough to stay small.
+export function pruneMediaSamples(days = 14) {
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const result = db.prepare("DELETE FROM media_samples WHERE at < ?").run(cutoff);
+  if (result.changes > 0) console.log(`[db] pruned ${result.changes} media sample(s)`);
+}
+
 // A hard restart leaves peer rows with left_at NULL and nobody to close them.
 // Closing them at boot means "still connected" only ever describes live peers.
 export function reconcileOpenSessions() {

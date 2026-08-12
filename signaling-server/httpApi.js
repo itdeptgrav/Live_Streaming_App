@@ -22,6 +22,8 @@ import {
   listRoomsForUser,
   usageSummary,
   usageDaily,
+  analyticsSummary,
+  latestSamplesForRoom,
 } from "./platformStore.js";
 import {
   generateRoomId,
@@ -271,6 +273,9 @@ export async function handleApiRequest(req, res, { publicUrl }) {
           live: Boolean(live && live.peers.size > 0),
           participantCount: live ? live.peers.size : 0,
           participants: live ? [...live.peers.entries()].map(describePeer) : [],
+          // What each machine last reported about its own encoder. Answers
+          // "why is this one slow" without asking anybody to read numbers back.
+          media: latestSamplesForRoom(roomId),
           endedAt: owner.ended_at,
         }),
         true
@@ -324,6 +329,26 @@ export async function handleApiRequest(req, res, { publicUrl }) {
         role,
         mode: owner.mode || "meeting",
       }),
+      true
+    );
+  }
+
+  if (method === "GET" && p === "/api/v1/analytics") {
+    const user = requireApiKey(req, res);
+    if (!user) return true;
+    const days = Math.min(Math.max(Number(url.searchParams.get("days")) || 7, 1), 90);
+    return (
+      json(res, 200, analyticsSummary(user.id, { sinceMs: Date.now() - days * 86400000 })),
+      true
+    );
+  }
+
+  if (method === "GET" && p === "/api/dashboard/analytics") {
+    const user = requireUser(req, res);
+    if (!user) return true;
+    const days = Math.min(Math.max(Number(url.searchParams.get("days")) || 7, 1), 90);
+    return (
+      json(res, 200, analyticsSummary(user.id, { sinceMs: Date.now() - days * 86400000 })),
       true
     );
   }

@@ -18,6 +18,8 @@ import {
   SCREEN_CODEC_OPTIONS,
   preferSharpness,
   negotiatedCodec,
+  readEncoderStats,
+  STATS_INTERVAL_MS,
 } from "../lib/screenTuning.js";
 
 const VERSION = "1.0.0";
@@ -131,6 +133,7 @@ class Session {
   stop() {
     if (!this.active) return;
     this.active = false;
+    if (this._statsTimer) clearInterval(this._statsTimer);
     try {
       if (this._producer && this._ws?.readyState === WebSocket.OPEN) {
         this._ws.send(JSON.stringify({ type: "meet-close-producer", producerId: this._producer.id }));
@@ -377,6 +380,16 @@ export async function share({
       roomId,
     });
     live = session;
+
+    // Report what the encoder is doing, for the life of the share. Without
+    // this the platform can only see that bytes moved, never why a particular
+    // machine struggled.
+    const statsTimer = setInterval(async () => {
+      if (!session.active || ws.readyState !== WebSocket.OPEN) return;
+      const stats = await readEncoderStats(producer);
+      if (stats) ws.send(JSON.stringify({ type: "meet-stats", source: "screen", ...stats }));
+    }, STATS_INTERVAL_MS);
+    session._statsTimer = statsTimer;
 
     // The browser's own "Stop sharing" bar ends the track without telling us.
     track.onended = () => session.stop();

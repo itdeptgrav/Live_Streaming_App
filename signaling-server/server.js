@@ -10,9 +10,14 @@ import {
   createWebRtcTransport,
   removePeer,
 } from "./meetRooms.js";
-import { reconcileOpenSessions } from "./db.js";
+import { reconcileOpenSessions, pruneMediaSamples } from "./db.js";
 import { verifyRoomToken } from "./auth.js";
-import { openUsageSession, closeUsageSession, getRoomOwner } from "./platformStore.js";
+import {
+  openUsageSession,
+  closeUsageSession,
+  getRoomOwner,
+  recordMediaSample,
+} from "./platformStore.js";
 import { handleApiRequest } from "./httpApi.js";
 
 const PORT = process.env.PORT || 4000;
@@ -22,6 +27,10 @@ const ALLOWED_ORIGINS = (process.env.ALLOWED_ORIGINS || "*").split(",").map((o) 
 const PUBLIC_URL = process.env.PUBLIC_URL || `ws://localhost:${PORT}`;
 
 reconcileOpenSessions();
+pruneMediaSamples();
+// Samples arrive continuously, so prune on a slow timer rather than only at
+// boot — a server that stays up for months would otherwise never clean up.
+setInterval(() => pruneMediaSamples(), 6 * 60 * 60 * 1000).unref();
  
 // ---- office-monitor rooms (unchanged mesh mode) ----
 // roomId -> { broadcaster: ws|null, viewers: Map<viewerId, ws> }
@@ -146,11 +155,15 @@ wss.on("connection", (ws) => {
     }
   });
 
-  ws.on("close", () => {
+  ws.on("close", async () => {
     if (ws.meta.mode === "meet") {
-      closeUsageSession(ws.meta.usageId);
-      ws.meta.usageId = null;
       const room = getMeetRoom(ws.meta.roomId);
+      const leaving = room?.peers.get(ws.meta.peerId);
+      // Read the counters while the transports still exist — removePeer closes
+      // them, and a closed transport reports nothing.
+      const bytes = leaving ? await measureTransportBytes(leaving) : {};
+      closeUsageSession(ws.meta.usageId, bytes);
+      ws.meta.usageId = null;
       if (room && ws.meta.peerId) {
         removePeer(room, ws.meta.peerId);
         for (const peer of room.peers.values()) {
@@ -465,6 +478,41 @@ async function handleMeetMessage(ws, msg) {
       break;
     }
 
+    // Encoder telemetry from the browser. None of this is visible server-side:
+    // the negotiated codec, whether the encoder is hardware, and whether the
+    // machine or the network is the limiting factor all live in the client.
+    case "meet-stats": {
+      const { room, peer } = currentMeetPeer(ws);
+      if (!room || !peer || !room.ownerUserId) return;
+      try {
+        recordMediaSample({
+          userId: room.ownerUserId,
+          roomId: room.id,
+          peerId: ws.meta.peerId,
+          identity: peer.identity,
+          role: peer.canPublish === false ? "viewer" : "publisher",
+          source: msg.source,
+          codec: msg.codec,
+          encoder: msg.encoder,
+          hardware: msg.hardware,
+          width: msg.width,
+          height: msg.height,
+          fps: msg.fps,
+          kbps: msg.kbps,
+          limitedBy: msg.limitedBy,
+          framesSent: msg.framesSent,
+          framesDropped: msg.framesDropped,
+          packetsLost: msg.packetsLost,
+          rttMs: msg.rttMs,
+          paused: msg.paused,
+          watchers: peer.demand ? [...peer.demand.values()].reduce((a, b) => a + b, 0) : 0,
+        });
+      } catch (err) {
+        console.error("[stats] could not record sample:", err.message);
+      }
+      break;
+    }
+
     // Mic/camera on-off state. A muted mic keeps its producer, so this is the
     // only way a watcher learns the difference between "no device" and "muted".
     case "meet-media-state": {
@@ -598,9 +646,11 @@ async function handleMeetMessage(ws, msg) {
     }
 
     case "meet-leave": {
-      closeUsageSession(ws.meta.usageId);
-      ws.meta.usageId = null;
       const room = getMeetRoom(ws.meta.roomId);
+      const leaving = room?.peers.get(ws.meta.peerId);
+      const bytes = leaving ? await measureTransportBytes(leaving) : {};
+      closeUsageSession(ws.meta.usageId, bytes);
+      ws.meta.usageId = null;
       if (room && ws.meta.peerId) {
         removePeer(room, ws.meta.peerId);
         for (const peer of room.peers.values()) {
@@ -642,6 +692,30 @@ function rehydrateRoom(roomId) {
     mode: record.mode || "meeting",
     requireEntireScreen: Boolean(record.require_entire_screen),
   });
+}
+
+/**
+ * Bytes actually moved by a peer, read from its transports before they close.
+ *
+ * This is the figure that maps to the hosting bill, and it cannot be inferred
+ * from session length: a publisher whose screen nobody watched is paused and
+ * costs almost nothing despite being "connected" all day.
+ */
+async function measureTransportBytes(peer) {
+  let bytesSent = 0;
+  let bytesReceived = 0;
+  for (const transport of peer.transports.values()) {
+    try {
+      for (const stat of await transport.getStats()) {
+        bytesSent += stat.bytesSent || 0;
+        bytesReceived += stat.bytesReceived || 0;
+      }
+    } catch {
+      // A transport already closing cannot report; its bytes are simply lost
+      // from the total rather than failing the disconnect.
+    }
+  }
+  return { bytesSent, bytesReceived };
 }
 
 /**
