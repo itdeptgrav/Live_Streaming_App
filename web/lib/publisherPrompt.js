@@ -162,9 +162,32 @@ reason to:
   VP8, that machine is encoding in software and its CPU will suffer; if it says
   H264 the work is on the GPU where it belongs.
 
-If a sharer's machine is still struggling, the cause is usually another
-application competing for CPU, or a very high refresh-rate display. Lower the
-frame rate by passing your own constraint rather than raising the bitrate.
+- Encoding stops entirely when nobody is subscribed, and resumes when someone
+  opens the view. A screen watched a few minutes an hour costs the sharer's
+  machine almost nothing for the rest of it. session.watchers and the
+  "watchers" event tell you whether anyone is currently looking.
+
+## Diagnosing a slow session
+
+Do not report "it is slow" — call session.getStats() on the SHARING machine
+while it is sharing:
+
+    const s = await session.getStats();
+    console.log(s);
+    // { codec: "H264", encoder: "ExternalEncoder", hardware: true,
+    //   resolution: "1920x1080", fps: 10, kbps: 2500,
+    //   limitedBy: "none", framesSent, framesDropped, paused, watchers }
+
+Read two fields first:
+
+- codec. "VP8" means the browser is encoding in software and that machine's
+  CPU will suffer no matter what else is tuned. "H264" means the work is on
+  dedicated hardware, where it belongs.
+- limitedBy. "cpu" means the machine cannot keep up. "bandwidth" means the
+  network cannot. "none" means neither, and the problem is elsewhere.
+
+encoder is the underlying implementation: a vendor name or "ExternalEncoder"
+is hardware; "libvpx" or "OpenH264" is software.
 
 ## Full reference
 

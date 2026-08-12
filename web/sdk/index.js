@@ -86,6 +86,47 @@ class Session {
     }
   }
 
+  /**
+   * A compact snapshot of what the encoder is actually doing.
+   *
+   * Exists because "it is slow" is not diagnosable. The two fields that settle
+   * almost every report are `codec` (VP8 means software encoding, and a pinned
+   * CPU) and `limitedBy` ("cpu" means the machine cannot keep up, "bandwidth"
+   * means the network cannot).
+   */
+  async getStats() {
+    const sender = this._producer?.rtpSender;
+    if (!sender?.getStats) return null;
+    const report = await sender.getStats();
+
+    let out = null;
+    let codec = null;
+    const codecs = new Map();
+    report.forEach((s) => {
+      if (s.type === "codec") codecs.set(s.id, s.mimeType);
+      if (s.type === "outbound-rtp" && s.kind === "video") out = s;
+    });
+    if (out?.codecId) codec = codecs.get(out.codecId);
+
+    return {
+      codec: (codec || "unknown").replace(/^video\//i, ""),
+      // "ExternalEncoder" / a vendor name means hardware. "libvpx" or
+      // "OpenH264" means software, and that machine will struggle.
+      encoder: out?.encoderImplementation || "unknown",
+      hardware: out?.powerEfficientEncoder ?? null,
+      resolution: out ? `${out.frameWidth}x${out.frameHeight}` : null,
+      fps: out?.framesPerSecond ?? null,
+      kbps: out?.targetBitrate ? Math.round(out.targetBitrate / 1000) : null,
+      // "cpu" is the machine failing to keep up; "bandwidth" is the network.
+      limitedBy: out?.qualityLimitationReason ?? null,
+      framesSent: out?.framesSent ?? null,
+      framesDropped: out?.framesDropped ?? null,
+      paused: Boolean(this._producer?.paused),
+      watchers: this.watchers,
+      capture: this.capture,
+    };
+  }
+
   /** Stops sharing and releases the capture. Safe to call twice. */
   stop() {
     if (!this.active) return;
