@@ -280,6 +280,22 @@ export async function share({
 
   // Assigned once the session exists; the socket starts receiving before then.
   let live = null;
+  // The server announces demand the moment a producer is created, which can
+  // land before this client has finished building its Session. The server only
+  // re-announces on change, so a dropped first notice — always "nobody is
+  // watching" — would leave the encoder running forever. Hold it instead.
+  const pendingDemand = new Map();
+
+  const applyDemand = (session, watchers) => {
+    session.watchers = watchers;
+    const shouldPause = watchers === 0;
+    try {
+      if (shouldPause && !session._producer.paused) session._producer.pause();
+      else if (!shouldPause && session._producer.paused) session._producer.resume();
+      session.idle = shouldPause;
+    } catch {}
+    session._emit("watchers", { watchers, idle: session.idle });
+  };
 
   ws.onmessage = (event) => {
     const msg = JSON.parse(event.data);
@@ -287,15 +303,9 @@ export async function share({
     // Nobody is watching, so stop encoding. A monitored screen is looked at
     // for a few minutes an hour; the rest of the time the sharer's machine
     // should be left alone rather than encoding frames nobody receives.
-    if (msg.type === "meet-producer-demand" && live && msg.producerId === live._producer?.id) {
-      live.watchers = msg.watchers;
-      const shouldPause = msg.watchers === 0;
-      try {
-        if (shouldPause && !live._producer.paused) live._producer.pause();
-        else if (!shouldPause && live._producer.paused) live._producer.resume();
-        live.idle = shouldPause;
-      } catch {}
-      live._emit("watchers", { watchers: msg.watchers, idle: live.idle });
+    if (msg.type === "meet-producer-demand") {
+      if (live && msg.producerId === live._producer?.id) applyDemand(live, msg.watchers);
+      else pendingDemand.set(msg.producerId, msg.watchers);
       return;
     }
 
@@ -380,6 +390,8 @@ export async function share({
       roomId,
     });
     live = session;
+    // Anything that arrived while the session was still being built.
+    if (pendingDemand.has(producer.id)) applyDemand(session, pendingDemand.get(producer.id));
 
     // Report what the encoder is doing, for the life of the share. Without
     // this the platform can only see that bytes moved, never why a particular

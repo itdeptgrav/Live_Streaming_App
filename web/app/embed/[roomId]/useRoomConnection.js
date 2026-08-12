@@ -32,6 +32,10 @@ export function useRoomConnection({ roomId, token, onEvent }) {
 
   // producerId -> Producer, so a demand notice can find the right one.
   const producersRef = useRef(new Map());
+  // Demand announced before the producer was registered here. The server only
+  // re-announces on change, so dropping the first notice — always "nobody is
+  // watching" — would leave the encoder running for a screen nobody sees.
+  const pendingDemandRef = useRef(new Map());
   const consumeQueueRef = useRef(Promise.resolve());
   const pendingRef = useRef(new Map());
   const ridRef = useRef(0);
@@ -315,7 +319,11 @@ export function useRoomConnection({ roomId, token, onEvent }) {
                 // time the sharer's machine can be left alone.
                 case "meet-producer-demand": {
                   const producer = producersRef.current.get(msg.producerId);
-                  if (producer && !producer.closed) {
+                  if (!producer) {
+                    pendingDemandRef.current.set(msg.producerId, msg.watchers);
+                    break;
+                  }
+                  if (!producer.closed) {
                     if (msg.watchers > 0 && producer.paused) producer.resume();
                     else if (msg.watchers === 0 && !producer.paused) producer.pause();
                   }
@@ -381,6 +389,11 @@ export function useRoomConnection({ roomId, token, onEvent }) {
       appData: { source, displaySurface, width, height },
     });
     producersRef.current.set(producer.id, producer);
+    const waiting = pendingDemandRef.current.get(producer.id);
+    if (waiting !== undefined) {
+      pendingDemandRef.current.delete(producer.id);
+      if (waiting === 0 && !producer.paused) producer.pause();
+    }
     return producer;
   }, []);
 
