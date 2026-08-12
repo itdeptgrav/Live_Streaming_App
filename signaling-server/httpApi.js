@@ -27,6 +27,8 @@ import {
   peerBreakdown,
   analyticsTimeline,
   bandwidthDaily,
+  integrationReport,
+  recordApiCall,
 } from "./platformStore.js";
 import {
   generateRoomId,
@@ -84,16 +86,37 @@ function requireUser(req, res) {
   return user;
 }
 
-function requireApiKey(req, res) {
+function requireApiKey(req, res, pathname) {
   const user = userForApiKey(bearer(req));
   if (!user) {
     json(res, 401, { error: "Invalid or revoked API key" });
     return null;
   }
+  // Counted per endpoint so the shape of an integration is visible. Room ids
+  // are collapsed to a placeholder — the interest is which endpoints are used,
+  // not which rooms.
+  if (pathname) {
+    try {
+      recordApiCall(user.id, req.method, normalisePath(pathname));
+    } catch {}
+  }
   return user;
 }
 
 const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+/**
+ * Collapses generated ids so endpoints aggregate, without eating real path
+ * segments. Matching on length alone turned /rooms/:id/tokens into
+ * /rooms/:id/:id, which then read as "this integration never mints tokens" —
+ * advice that would have sent someone hunting a bug that was not there.
+ */
+function normalisePath(pathname) {
+  return pathname
+    .split("/")
+    .map((segment) => (/^[0-9a-f]{8,}$/i.test(segment) ? ":id" : segment))
+    .join("/");
+}
 
 /**
  * Flattens a live peer into the shape the API exposes. `sharing` is the part
@@ -236,7 +259,7 @@ export async function handleApiRequest(req, res, { publicUrl }) {
   // ---------------- public API v1 (API key) ----------------
 
   if (p === "/api/v1/rooms" && (method === "POST" || method === "GET")) {
-    const user = requireApiKey(req, res);
+    const user = requireApiKey(req, res, p);
     if (!user) return true;
 
     if (method === "GET") {
@@ -285,7 +308,7 @@ export async function handleApiRequest(req, res, { publicUrl }) {
 
   const roomMatch = p.match(/^\/api\/v1\/rooms\/([\w-]+)$/);
   if (roomMatch) {
-    const user = requireApiKey(req, res);
+    const user = requireApiKey(req, res, p);
     if (!user) return true;
     const roomId = roomMatch[1];
     const owner = getRoomOwner(roomId);
@@ -320,7 +343,7 @@ export async function handleApiRequest(req, res, { publicUrl }) {
 
   const tokenMatch = p.match(/^\/api\/v1\/rooms\/([\w-]+)\/tokens$/);
   if (tokenMatch && method === "POST") {
-    const user = requireApiKey(req, res);
+    const user = requireApiKey(req, res, p);
     if (!user) return true;
     const roomId = tokenMatch[1];
     const owner = getRoomOwner(roomId);
@@ -363,7 +386,7 @@ export async function handleApiRequest(req, res, { publicUrl }) {
   }
 
   if (method === "GET" && p === "/api/v1/analytics") {
-    const user = requireApiKey(req, res);
+    const user = requireApiKey(req, res, p);
     if (!user) return true;
     const days = Math.min(Math.max(Number(url.searchParams.get("days")) || 7, 1), 90);
     const sinceMs = Date.now() - days * 86400000;
@@ -375,6 +398,22 @@ export async function handleApiRequest(req, res, { publicUrl }) {
       }),
       true
     );
+  }
+
+  if (method === "GET" && p === "/api/dashboard/integration") {
+    const user = requireUser(req, res);
+    if (!user) return true;
+    const days = Math.min(Math.max(Number(url.searchParams.get("days")) || 7, 1), 90);
+    return (
+      json(res, 200, integrationReport(user.id, { sinceMs: Date.now() - days * 86400000 })),
+      true
+    );
+  }
+
+  if (method === "GET" && p === "/api/v1/integration") {
+    const user = requireApiKey(req, res, p);
+    if (!user) return true;
+    return json(res, 200, integrationReport(user.id)), true;
   }
 
   if (method === "GET" && p === "/api/dashboard/analytics") {
@@ -395,7 +434,7 @@ export async function handleApiRequest(req, res, { publicUrl }) {
   }
 
   if (method === "GET" && p === "/api/v1/usage") {
-    const user = requireApiKey(req, res);
+    const user = requireApiKey(req, res, p);
     if (!user) return true;
     return json(res, 200, { summary: usageSummary(user.id), daily: usageDaily(user.id) }), true;
   }

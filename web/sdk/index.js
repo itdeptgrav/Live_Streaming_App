@@ -23,7 +23,7 @@ import {
   STATS_INTERVAL_MS,
 } from "../lib/screenTuning.js";
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 
 function readClaims(token) {
   try {
@@ -338,7 +338,11 @@ export async function share({
   };
 
   try {
-    ws.send(JSON.stringify({ type: "meet-join", roomId, token }));
+    // Identifies the integration path, so a stale cached build or a publisher
+    // wired through the iframe is visible from the server instead of guessed at.
+    ws.send(
+      JSON.stringify({ type: "meet-join", roomId, token, client: "sdk", clientVersion: VERSION })
+    );
     const joinInfo = await joinedPromise;
 
     const device = new Device();

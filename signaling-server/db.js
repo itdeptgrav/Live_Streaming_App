@@ -147,6 +147,27 @@ export function pruneMediaSamples(days = 14) {
   if (result.changes > 0) console.log(`[db] pruned ${result.changes} media sample(s)`);
 }
 
+// Which client library connected, and from what. Without this we cannot tell
+// an integrator running a stale cached build from one wired up incorrectly,
+// and both look identical from the outside.
+addColumnIfMissing("usage_sessions", "client", "TEXT");
+addColumnIfMissing("usage_sessions", "client_version", "TEXT");
+addColumnIfMissing("usage_sessions", "user_agent", "TEXT");
+
+// Which endpoints a customer's backend actually calls. Counts only — the point
+// is to spot an integration using the wrong shape of the API, not to log
+// traffic.
+db.exec(`
+CREATE TABLE IF NOT EXISTS api_calls (
+  user_id  TEXT NOT NULL,
+  method   TEXT NOT NULL,
+  path     TEXT NOT NULL,
+  calls    INTEGER NOT NULL DEFAULT 0,
+  last_at  INTEGER NOT NULL,
+  PRIMARY KEY (user_id, method, path)
+);
+`);
+
 // A hard restart leaves peer rows with left_at NULL and nobody to close them.
 // Closing them at boot means "still connected" only ever describes live peers.
 export function reconcileOpenSessions() {

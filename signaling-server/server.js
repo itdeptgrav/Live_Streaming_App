@@ -119,13 +119,17 @@ const heartbeat = setInterval(() => {
 
 wss.on("close", () => clearInterval(heartbeat));
 
-wss.on("connection", (ws) => {
+wss.on("connection", (ws, req) => {
   ws.isAlive = true;
   // Browsers answer protocol-level pings automatically, so nothing is needed
   // on the client for this to work.
   ws.on("pong", () => {
     ws.isAlive = true;
   });
+
+  // Kept from the upgrade request: the only place the browser identifies
+  // itself, and the fastest way to explain a codec difference between machines.
+  ws.userAgent = req?.headers?.["user-agent"] || null;
 
   ws.meta = { mode: null, role: null, roomId: null, viewerId: null, peerId: null, usageId: null };
 
@@ -323,6 +327,11 @@ async function handleMeetMessage(ws, msg) {
           peerId,
           identity,
           displayName,
+          // Self-reported, so it says which integration path was taken rather
+          // than merely which browser made the request.
+          client: typeof msg.client === "string" ? msg.client.slice(0, 32) : null,
+          clientVersion: typeof msg.clientVersion === "string" ? msg.clientVersion.slice(0, 32) : null,
+          userAgent: ws.userAgent,
         });
       }
 

@@ -12,6 +12,9 @@ import { Device } from "mediasoup-client";
 import { SIGNALING_URL } from "@/lib/realtime";
 import { getIceServers } from "@/lib/webrtcConfig";
 
+// Reported on join so the platform can tell which integration path was used.
+const EMBED_VERSION = "1.1.0";
+
 export function useRoomConnection({ roomId, token, onEvent }) {
   const [phase, setPhase] = useState("idle"); // idle | connecting | live | ended
   const [error, setError] = useState(null);
@@ -231,7 +234,8 @@ export function useRoomConnection({ roomId, token, onEvent }) {
             const ws = new WebSocket(SIGNALING_URL);
             wsRef.current = ws;
 
-            ws.onopen = () => send({ type: "meet-join", roomId, token });
+            ws.onopen = () =>
+              send({ type: "meet-join", roomId, token, client: "embed", clientVersion: EMBED_VERSION });
             ws.onerror = () => {
               const message = "Could not reach the streaming server.";
               setError(message);

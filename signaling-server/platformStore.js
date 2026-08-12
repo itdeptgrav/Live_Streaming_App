@@ -122,13 +122,30 @@ export function listRoomsForUser(userId, { limit = 50 } = {}) {
 
 // ---------------- usage ----------------
 
-export function openUsageSession({ userId, roomId, peerId, identity, displayName }) {
+export function openUsageSession({
+  userId, roomId, peerId, identity, displayName, client, clientVersion, userAgent,
+}) {
   const id = newId("use");
   db.prepare(
-    `INSERT INTO usage_sessions (id, user_id, room_id, peer_id, identity, display_name, joined_at)
-     VALUES (?, ?, ?, ?, ?, ?, ?)`
-  ).run(id, userId, roomId, peerId, identity || null, displayName || null, Date.now());
+    `INSERT INTO usage_sessions
+       (id, user_id, room_id, peer_id, identity, display_name, joined_at,
+        client, client_version, user_agent)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    id, userId, roomId, peerId, identity || null, displayName || null, Date.now(),
+    client || null, clientVersion || null, (userAgent || "").slice(0, 300) || null
+  );
   return id;
+}
+
+/** Counts an API call. Aggregated, so the table stays one row per endpoint. */
+export function recordApiCall(userId, method, path) {
+  db.prepare(
+    `INSERT INTO api_calls (user_id, method, path, calls, last_at)
+     VALUES (?, ?, ?, 1, ?)
+     ON CONFLICT(user_id, method, path)
+     DO UPDATE SET calls = calls + 1, last_at = excluded.last_at`
+  ).run(userId, method, path, Date.now());
 }
 
 export function closeUsageSession(usageId, { bytesSent = null, bytesReceived = null } = {}) {
@@ -460,4 +477,178 @@ export function bandwidthDaily(userId, days = 14) {
       gbReceived: +(r.bytes_received / 1e9).toFixed(3),
       sessions: r.sessions,
     }));
+}
+
+/**
+ * What the integration actually looks like from our side, and what is wrong
+ * with it.
+ *
+ * Exists because a customer can do everything on their side "correctly" against
+ * the wrong shape of the API, and from the outside that is indistinguishable
+ * from the platform being at fault. Guessing costs a round trip each time.
+ */
+export function integrationReport(userId, { sinceMs } = {}) {
+  const since = sinceMs ?? Date.now() - 7 * 24 * 60 * 60 * 1000;
+
+  const clients = db
+    .prepare(
+      `SELECT COALESCE(client, 'unknown')         AS client,
+              COALESCE(client_version, 'unknown') AS version,
+              COUNT(*)                            AS sessions,
+              MAX(joined_at)                      AS last_seen
+         FROM usage_sessions
+        WHERE user_id = ? AND joined_at >= ?
+        GROUP BY client, version
+        ORDER BY sessions DESC`
+    )
+    .all(userId, since);
+
+  const browsers = db
+    .prepare(
+      `SELECT user_agent, COUNT(*) AS sessions
+         FROM usage_sessions
+        WHERE user_id = ? AND joined_at >= ? AND user_agent IS NOT NULL
+        GROUP BY user_agent ORDER BY sessions DESC LIMIT 20`
+    )
+    .all(userId, since)
+    .map((r) => ({ browser: describeBrowser(r.user_agent), sessions: r.sessions }));
+
+  const endpoints = db
+    .prepare(
+      `SELECT method, path, calls, last_at FROM api_calls
+        WHERE user_id = ? ORDER BY calls DESC`
+    )
+    .all(userId)
+    .map((r) => ({ method: r.method, path: r.path, calls: r.calls, lastAt: r.last_at }));
+
+  const rooms = db
+    .prepare(
+      `SELECT COALESCE(mode, 'meeting') AS mode,
+              SUM(CASE WHEN require_entire_screen = 1 THEN 1 ELSE 0 END) AS strict,
+              COUNT(*) AS rooms
+         FROM rooms WHERE user_id = ? GROUP BY mode`
+    )
+    .all(userId);
+
+  // Publishers reached through the iframe rather than the SDK. Legal, but it
+  // means their users click twice to start a share.
+  const iframePublishers = db
+    .prepare(
+      `SELECT COUNT(DISTINCT u.identity) AS n
+         FROM usage_sessions u
+         JOIN media_samples m ON m.peer_id = u.peer_id
+        WHERE u.user_id = ? AND u.joined_at >= ?
+          AND COALESCE(u.client, '') = 'embed' AND m.source = 'screen'`
+    )
+    .get(userId, since);
+
+  return {
+    since,
+    clients,
+    browsers,
+    endpoints,
+    rooms: Object.fromEntries(rooms.map((r) => [r.mode, { rooms: r.rooms, strict: r.strict }])),
+    findings: diagnose({ clients, endpoints, rooms, iframePublishers: iframePublishers?.n || 0 }),
+  };
+}
+
+/** Turns the raw picture into specific, actionable advice. */
+function diagnose({ clients, endpoints, rooms, iframePublishers }) {
+  const out = [];
+  const called = (method, match) =>
+    endpoints.some((e) => e.method === method && e.path.includes(match));
+  const seen = (name) => clients.some((c) => c.client === name && c.sessions > 0);
+
+  if (clients.length === 0) {
+    out.push({
+      level: "info",
+      title: "Nothing has connected yet",
+      detail: "No participant has joined a room in this window, so there is nothing to assess.",
+    });
+    return out;
+  }
+
+  if (iframePublishers > 0) {
+    out.push({
+      level: "warn",
+      title: `${iframePublishers} publisher${iframePublishers === 1 ? "" : "s"} shared through the iframe`,
+      detail:
+        "The iframe cannot open the screen picker from your own button, so those users have to " +
+        "click twice. Use the publisher SDK for the person sharing and keep the iframe for people " +
+        "watching. See /docs/publisher-prompt.txt.",
+    });
+  }
+
+  if (seen("sdk")) {
+    const versions = clients.filter((c) => c.client === "sdk").map((c) => c.version);
+    if (new Set(versions).size > 1) {
+      out.push({
+        level: "warn",
+        title: "More than one SDK version is in use",
+        detail:
+          `Seen: ${[...new Set(versions)].join(", ")}. Older builds are usually a cached copy of ` +
+          "grav-stream.js. A hard refresh, or a cache-busting query on the script tag, clears it.",
+      });
+    }
+  }
+
+  if (!called("POST", "/tokens")) {
+    out.push({
+      level: "error",
+      title: "No room tokens have been minted",
+      detail:
+        "Participants cannot join a room without a token from POST /api/v1/rooms/:roomId/tokens. " +
+        "If joins are working anyway, they are using rooms created outside the v1 API.",
+    });
+  }
+
+  const meetingRooms = rooms.find((r) => r.mode === "meeting")?.rooms || 0;
+  const screenRooms = rooms.find((r) => r.mode === "screen")?.rooms || 0;
+  if (meetingRooms > 0 && screenRooms === 0) {
+    out.push({
+      level: "warn",
+      title: "Every room is a meeting room",
+      detail:
+        'Screen monitoring should create rooms with mode "screen". A meeting room asks the sharer ' +
+        "for a camera and microphone they do not need, and shows a meeting interface.",
+    });
+  }
+
+  if (!called("GET", "/rooms/")) {
+    out.push({
+      level: "info",
+      title: "Room status is never polled",
+      detail:
+        "GET /api/v1/rooms/:roomId reports who is connected and which surface they picked. Worth " +
+        "polling if you want to show live monitoring state in your own product.",
+    });
+  }
+
+  if (out.length === 0) {
+    out.push({
+      level: "ok",
+      title: "The integration looks correct",
+      detail: "Clients, endpoints and room modes are all consistent with the documented approach.",
+    });
+  }
+  return out;
+}
+
+/** Just enough of a user agent to be useful, without storing a fingerprint. */
+function describeBrowser(ua = "") {
+  const browser =
+    /Edg\//.test(ua) ? "Edge"
+    : /OPR\//.test(ua) ? "Opera"
+    : /Firefox\//.test(ua) ? "Firefox"
+    : /Chrome\//.test(ua) ? "Chrome"
+    : /Safari\//.test(ua) ? "Safari"
+    : "Unknown";
+  const version = ua.match(/(?:Edg|OPR|Firefox|Chrome|Version)\/(\d+)/)?.[1];
+  const os =
+    /Windows NT 10/.test(ua) ? "Windows"
+    : /Mac OS X/.test(ua) ? "macOS"
+    : /Android/.test(ua) ? "Android"
+    : /Linux/.test(ua) ? "Linux"
+    : "Unknown OS";
+  return `${browser}${version ? " " + version : ""} · ${os}`;
 }
