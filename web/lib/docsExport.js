@@ -379,12 +379,18 @@ new Room().connect() are replaced by the iframe. livekit-client,
 Defaults are tuned for screen text rather than motion video. You should not
 need to change any of this.
 
-- Capture is capped at 1920x1080. A 1440p or 4K desktop otherwise gets the same
+- Capture is capped at 1920x1200. A 1440p or 4K desktop otherwise gets the same
   bitrate spread across several times the pixels — which is what makes small
   text unreadable — and costs the same multiple in encoder CPU.
-- contentHint is "detail" and scaleResolutionDownBy is pinned to 1, so under
-  bandwidth pressure the encoder drops frames instead of resolution. Text stays
-  sharp; motion gets choppier. That is the right trade for a desktop.
+- The encoder is asked, via degradationPreference, to shed frame rate rather
+  than resolution, so text stays sharp while motion gets choppier. It is asked
+  rather than forced: an encoder with no way to shed load queues frames in
+  memory instead, which drives both browser memory and latency up without
+  bound.
+- Capture runs at 10 fps. A desktop is mostly static, and halving the frame
+  rate is the cheapest way to keep the encoder ahead of the capture.
+- screen-share-started reports the negotiated codec. If it says VP8 rather than
+  H264, that machine is encoding in software and its CPU will suffer.
 - H.264 is offered ahead of VP8. Almost every machine has a hardware H.264
   encoder, while VP8 encodes in software — the difference between a responsive
   machine and one that reports "not responding" while sharing.

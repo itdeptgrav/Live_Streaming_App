@@ -13,6 +13,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { readRoomTokenClaims, surfaceLabel } from "@/lib/roomToken";
 import { resolveEmbedUi } from "@/lib/embedOptions";
 import { captureScreen } from "@/lib/screenCapture";
+import { screenEncodings, SCREEN_CODEC_OPTIONS, preferSharpness, negotiatedCodec } from "@/lib/screenTuning";
 import { useRoomConnection } from "./useRoomConnection";
 
 const CHANNEL = "grav-stream";
@@ -168,12 +169,8 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
           displaySurface: capture.displaySurface,
           width: capture.width,
           height: capture.height,
-          // scaleResolutionDownBy: 1 forbids the encoder from quietly halving
-          // the resolution when bandwidth tightens. For a camera that is a
-          // sensible trade; for text it is the difference between readable and
-          // not, so drop frames instead — which contentHint "detail" asks for.
-          encodings: [{ maxBitrate: 4_000_000, scaleResolutionDownBy: 1 }],
-          codecOptions: { videoGoogleStartBitrate: 1500 },
+          encodings: screenEncodings(),
+          codecOptions: SCREEN_CODEC_OPTIONS,
         });
       } catch (err) {
         stream.getTracks().forEach((t) => t.stop());
@@ -181,10 +178,20 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
         throw err;
       }
 
-      setSharing({ capture });
+      // Ask the encoder to shed frame rate rather than sharpness. Doing this
+      // through degradationPreference, instead of pinning the resolution,
+      // leaves it a way to fall back further if it still cannot keep up —
+      // without that escape route frames queue in memory instead.
+      await preferSharpness(screenProducerRef.current);
+      const codec = negotiatedCodec(screenProducerRef.current);
+
+      setSharing({ capture: { ...capture, codec } });
       // isEntireScreen saves every integrator from re-deriving the same check.
+      // codec is surfaced because VP8 encodes in software on most machines and
+      // H264 does not — it explains most "my CPU is pinned" reports outright.
       emit("screen-share-started", {
         ...capture,
+        codec,
         isEntireScreen: capture.displaySurface === "monitor",
       });
 

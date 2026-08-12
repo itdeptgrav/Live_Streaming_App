@@ -146,16 +146,21 @@ panel without fighting your layout.
 The SDK sets these for you. Do not override them unless you have measured a
 reason to:
 
-- Capture is capped at 1920x1080. A 1440p or 4K desktop otherwise gets the same
-  bitrate spread over several times the pixels, which is what makes small text
-  unreadable, and costs the same multiple in CPU.
-- contentHint is "detail" and the encoder is told not to reduce resolution, so
-  under pressure it drops frames rather than sharpness. Text stays legible.
+- Capture is capped at 1920x1200 and 10 frames per second. A desktop is mostly
+  static, so the frame rate matters far more than it would for camera video,
+  and halving it is the cheapest way to keep the encoder ahead of the capture.
+- The encoder is ASKED to shed frame rate before sharpness, not forced to hold
+  resolution. An encoder with no way to shed load queues frames in memory, and
+  that queue is what sends browser memory into gigabytes while making every
+  update arrive seconds late.
 - H.264 is preferred over VP8, because nearly every machine has a hardware
   H.264 encoder and VP8 is software-only. This is the difference between a
   responsive machine and one that reports "not responding".
 - The signaling socket is kept alive with a server-side ping, so a share that
   runs for a full working day is not cut off by an idle timeout.
+- screen-share-started now reports the negotiated codec. Read it. If it says
+  VP8, that machine is encoding in software and its CPU will suffer; if it says
+  H264 the work is on the GPU where it belongs.
 
 If a sharer's machine is still struggling, the cause is usually another
 application competing for CPU, or a very high refresh-rate display. Lower the

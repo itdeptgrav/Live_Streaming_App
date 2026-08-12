@@ -12,6 +12,13 @@
 //   const session = await GravStream.share({ token, serverUrl });
 //
 import { Device } from "mediasoup-client";
+import {
+  SCREEN_VIDEO_CONSTRAINTS,
+  screenEncodings,
+  SCREEN_CODEC_OPTIONS,
+  preferSharpness,
+  negotiatedCodec,
+} from "../lib/screenTuning.js";
 
 const VERSION = "1.0.0";
 
@@ -115,7 +122,7 @@ export async function share({
   token,
   serverUrl,
   requireEntireScreen = false,
-  maxBitrate = 4_000_000,
+  maxBitrate = 3_000_000,
 } = {}) {
   if (!token) throw new GravStreamError("TOKEN_REQUIRED", "A room token is required.");
 
@@ -146,16 +153,7 @@ export async function share({
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
-      video: {
-        displaySurface: "monitor",
-        // Cap at 1080p. A 1440p or 4K desktop captured at full size gets the
-        // same bitrate spread over four times the pixels, which is what makes
-        // small text unreadable — and it costs the encoder the same multiple
-        // in CPU, which is what makes the sharer's machine stop responding.
-        width: { max: 1920 },
-        height: { max: 1080 },
-        frameRate: { ideal: 15, max: 30 },
-      },
+      video: SCREEN_VIDEO_CONSTRAINTS,
       audio: false,
       monitorTypeSurfaces: "include",
       selfBrowserSurface: "exclude",
@@ -288,11 +286,8 @@ export async function share({
 
     const producer = await sendTransport.produce({
       track,
-      // scaleResolutionDownBy: 1 forbids the encoder from quietly halving the
-      // resolution under pressure. For text that is the difference between
-      // readable and not, so drop frames instead.
-      encodings: [{ maxBitrate, scaleResolutionDownBy: 1 }],
-      codecOptions: { videoGoogleStartBitrate: 1500 },
+      encodings: screenEncodings(maxBitrate),
+      codecOptions: SCREEN_CODEC_OPTIONS,
       appData: {
         source: "screen",
         displaySurface: capture.displaySurface,
@@ -300,6 +295,13 @@ export async function share({
         height: capture.height,
       },
     });
+
+    // Shed frame rate rather than sharpness under load. Expressed through
+    // degradationPreference rather than by pinning the resolution, so the
+    // encoder keeps a way to fall back further — without one, frames queue in
+    // memory and both latency and memory climb without bound.
+    await preferSharpness(producer);
+    capture.codec = negotiatedCodec(producer);
 
     const session = new Session({
       ws,
