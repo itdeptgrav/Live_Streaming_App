@@ -13,7 +13,11 @@ import { SIGNALING_URL } from "@/lib/realtime";
 import { getIceServers } from "@/lib/webrtcConfig";
 
 // Reported on join so the platform can tell which integration path was used.
-const EMBED_VERSION = "1.1.0";
+const EMBED_VERSION = "1.2.0";
+
+// Backoff for a dropped watcher connection. Ends deliberately rather than
+// retrying forever: a frame that has been unreachable this long should say so.
+const RECONNECT_DELAYS_MS = [1000, 2000, 5000, 10000, 20000];
 
 export function useRoomConnection({ roomId, token, onEvent }) {
   const [phase, setPhase] = useState("idle"); // idle | connecting | live | ended
@@ -39,6 +43,15 @@ export function useRoomConnection({ roomId, token, onEvent }) {
   // re-announces on change, so dropping the first notice — always "nobody is
   // watching" — would leave the encoder running for a screen nobody sees.
   const pendingDemandRef = useRef(new Map());
+  // Reconnect bookkeeping. A watcher whose socket drops was previously left
+  // staring at a frozen last frame with nothing retrying and nothing said —
+  // indistinguishable, from the watcher's side, from the sharer having stopped.
+  const intentionalCloseRef = useRef(false);
+  const reconnectingRef = useRef(false);
+  const connectOptsRef = useRef(null);
+  // Held in a ref because ws.onclose is installed inside connect(), before
+  // reconnect() exists, and must not capture a stale copy of it.
+  const reconnectRef = useRef(null);
   const consumeQueueRef = useRef(Promise.resolve());
   const pendingRef = useRef(new Map());
   const ridRef = useRef(0);
@@ -225,6 +238,8 @@ export function useRoomConnection({ roomId, token, onEvent }) {
   const connect = useCallback(
     ({ needsSendTransport }) =>
       new Promise((resolve, reject) => {
+        connectOptsRef.current = { needsSendTransport };
+        intentionalCloseRef.current = false;
         setPhase("connecting");
         setError(null);
 
@@ -245,6 +260,10 @@ export function useRoomConnection({ roomId, token, onEvent }) {
             ws.onclose = () => {
               for (const [, p] of pendingRef.current) p.reject(new Error("connection closed"));
               pendingRef.current.clear();
+              // A close we did not ask for is a dropped connection, not the end
+              // of the session. Everything subscribed here is now dead, so it
+              // has to be rebuilt rather than left on screen looking live.
+              if (!intentionalCloseRef.current) reconnectRef.current?.();
             };
 
             ws.onmessage = async (event) => {
@@ -426,6 +445,77 @@ export function useRoomConnection({ roomId, token, onEvent }) {
     }
   }, []);
 
+  /**
+   * Rebuilds the session after a connection we did not choose to close.
+   *
+   * Every consumer, transport and device belongs to the socket that is gone, so
+   * none of it can be salvaged — but the room, the token and the identity all
+   * still hold, so joining again restores the same view. Without this a watcher
+   * simply kept the last frame it decoded, which is exactly the "presenter is
+   * sharing but I see black" report: nothing was arriving and nothing said so.
+   */
+  const reconnect = useCallback(async () => {
+    if (reconnectingRef.current || intentionalCloseRef.current) return;
+    reconnectingRef.current = true;
+
+    // The old consumers are dead. Clearing them turns a stale frozen picture
+    // into an honest "reconnecting" state.
+    for (const map of [remoteVideosRef.current, remoteAudiosRef.current]) {
+      for (const [, entry] of map) {
+        try {
+          entry.consumer.close();
+        } catch {}
+      }
+      map.clear();
+    }
+    peersRef.current.clear();
+    producersRef.current.clear();
+    syncTracks();
+    syncPeers();
+
+    try {
+      sendTransportRef.current?.close();
+      recvTransportRef.current?.close();
+    } catch {}
+    sendTransportRef.current = null;
+    recvTransportRef.current = null;
+    wsRef.current = null;
+    deviceRef.current = null;
+
+    setPhase("reconnecting");
+
+    for (let attempt = 0; attempt < RECONNECT_DELAYS_MS.length; attempt++) {
+      if (intentionalCloseRef.current) break;
+      emit.current?.("reconnecting", {
+        attempt: attempt + 1,
+        of: RECONNECT_DELAYS_MS.length,
+      });
+      await new Promise((r) => setTimeout(r, RECONNECT_DELAYS_MS[attempt]));
+      if (intentionalCloseRef.current) break;
+
+      try {
+        await connect(connectOptsRef.current || { needsSendTransport: false });
+        reconnectingRef.current = false;
+        emit.current?.("resumed", { attempts: attempt + 1 });
+        return;
+      } catch {
+        // Keep trying; the loop decides when to stop.
+      }
+    }
+
+    reconnectingRef.current = false;
+    setPhase("ended");
+    setError("The connection was lost and could not be restored.");
+    emit.current?.("error", {
+      code: "DISCONNECTED",
+      message: "The connection was lost and could not be restored.",
+    });
+  }, [connect, syncTracks, syncPeers, setError]);
+
+  useEffect(() => {
+    reconnectRef.current = reconnect;
+  }, [reconnect]);
+
   const disconnect = useCallback(() => {
     // No socket means there is nothing to tear down, and moving to "ended"
     // would be wrong. StrictMode runs this cleanup once before the real mount,
@@ -433,6 +523,7 @@ export function useRoomConnection({ roomId, token, onEvent }) {
     // had connected at all.
     if (!wsRef.current) return;
 
+    intentionalCloseRef.current = true;
     send({ type: "meet-leave" });
     wsRef.current.close();
     wsRef.current = null;
@@ -459,6 +550,7 @@ export function useRoomConnection({ roomId, token, onEvent }) {
 
   return {
     phase,
+    reconnecting: reconnectingRef,
     error,
     setError,
     session,

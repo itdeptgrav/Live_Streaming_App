@@ -790,9 +790,18 @@ function SharingConfirmation({ capture }) {
 
 function ViewerStage({ phase, screenFeeds, cameraFeeds, peerName, publishers, requestKeyFrame, screenMode }) {
   if (phase !== "live") {
+    // A dropped connection is not the same as an initial one, and a watcher
+    // needs to be told which — otherwise "still connecting" and "the picture
+    // died" look identical from here.
+    const message =
+      phase === "reconnecting"
+        ? "Connection lost — reconnecting…"
+        : phase === "ended"
+          ? "The connection was lost."
+          : "Connecting to the session…";
     return (
       <div className="grid flex-1 place-items-center">
-        <p className="text-sm text-zinc-500">Connecting to the session…</p>
+        <p className="text-sm text-zinc-500">{message}</p>
       </div>
     );
   }
