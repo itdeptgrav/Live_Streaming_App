@@ -499,7 +499,10 @@ export function integrationReport(userId, { sinceMs } = {}) {
          FROM usage_sessions
         WHERE user_id = ? AND joined_at >= ?
         GROUP BY client, version
-        ORDER BY sessions DESC`
+        -- Most recent first, not most numerous. Sorting by count buries the
+        -- client actually in use behind a pile of historical sessions from
+        -- before client reporting existed, which reads as "still broken".
+        ORDER BY last_seen DESC`
     )
     .all(userId, since);
 
@@ -576,6 +579,20 @@ function diagnose({ clients, endpoints, rooms, iframePublishers }) {
   const unknownSessions = clients
     .filter((c) => c.client === "unknown")
     .reduce((sum, c) => sum + c.sessions, 0);
+
+  if (identified.length > 0) {
+    const current = identified[0];
+    out.push({
+      level: "ok",
+      title: `Currently running ${current.client} ${current.version}`,
+      detail:
+        `Most recent session was ${current.client} ${current.version}.` +
+        (unknownSessions
+          ? ` The ${unknownSessions} session(s) listed as unknown are older ones from before ` +
+            "clients reported themselves, and will age out of this window."
+          : ""),
+    });
+  }
 
   if (identified.length === 0) {
     out.push({
