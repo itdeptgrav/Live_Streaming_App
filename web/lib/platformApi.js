@@ -54,3 +54,4 @@ export const createKey = (name) => request("/api/keys", { method: "POST", body: 
 export const revokeKey = (id) => request(`/api/keys/${id}`, { method: "DELETE" });
 export const getUsage = () => request("/api/dashboard/usage");
 export const getRooms = () => request("/api/dashboard/rooms");
+export const getAnalytics = (days = 7) => request(`/api/dashboard/analytics?days=${days}`);

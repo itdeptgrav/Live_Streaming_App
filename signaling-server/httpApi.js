@@ -24,6 +24,9 @@ import {
   usageDaily,
   analyticsSummary,
   latestSamplesForRoom,
+  peerBreakdown,
+  analyticsTimeline,
+  bandwidthDaily,
 } from "./platformStore.js";
 import {
   generateRoomId,
@@ -337,8 +340,13 @@ export async function handleApiRequest(req, res, { publicUrl }) {
     const user = requireApiKey(req, res);
     if (!user) return true;
     const days = Math.min(Math.max(Number(url.searchParams.get("days")) || 7, 1), 90);
+    const sinceMs = Date.now() - days * 86400000;
     return (
-      json(res, 200, analyticsSummary(user.id, { sinceMs: Date.now() - days * 86400000 })),
+      json(res, 200, {
+        days,
+        ...analyticsSummary(user.id, { sinceMs }),
+        peers: peerBreakdown(user.id, { sinceMs }),
+      }),
       true
     );
   }
@@ -347,8 +355,15 @@ export async function handleApiRequest(req, res, { publicUrl }) {
     const user = requireUser(req, res);
     if (!user) return true;
     const days = Math.min(Math.max(Number(url.searchParams.get("days")) || 7, 1), 90);
+    const sinceMs = Date.now() - days * 86400000;
     return (
-      json(res, 200, analyticsSummary(user.id, { sinceMs: Date.now() - days * 86400000 })),
+      json(res, 200, {
+        days,
+        ...analyticsSummary(user.id, { sinceMs }),
+        peers: peerBreakdown(user.id, { sinceMs }),
+        timeline: analyticsTimeline(user.id, { sinceMs }),
+        bandwidthDaily: bandwidthDaily(user.id, days),
+      }),
       true
     );
   }

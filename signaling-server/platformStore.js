@@ -349,3 +349,115 @@ export function usageDaily(userId, days = 14) {
     participantMinutes: Math.round(r.total_ms / 60000),
   }));
 }
+
+/**
+ * Per-machine rollup, worst first.
+ *
+ * The actionable view: a fleet-wide average hides the three laptops encoding
+ * in software while everything else is fine, and those three are the whole
+ * problem.
+ */
+export function peerBreakdown(userId, { sinceMs, limit = 100 } = {}) {
+  const since = sinceMs ?? Date.now() - 7 * 24 * 60 * 60 * 1000;
+  return db
+    .prepare(
+      `SELECT identity,
+              COUNT(*)                                        AS samples,
+              MAX(at)                                         AS last_seen,
+              MAX(room_id)                                    AS room_id,
+              ROUND(AVG(fps), 1)                              AS avg_fps,
+              ROUND(AVG(kbps))                                AS avg_kbps,
+              MAX(width || 'x' || height)                     AS resolution,
+              SUM(frames_dropped)                             AS frames_dropped,
+              SUM(packets_lost)                               AS packets_lost,
+              ROUND(AVG(rtt_ms))                              AS avg_rtt_ms,
+              SUM(CASE WHEN hardware = 0 THEN 1 ELSE 0 END)   AS software_samples,
+              SUM(CASE WHEN limited_by = 'cpu' THEN 1 ELSE 0 END) AS cpu_limited,
+              SUM(CASE WHEN limited_by = 'bandwidth' THEN 1 ELSE 0 END) AS bw_limited,
+              SUM(CASE WHEN paused = 1 THEN 1 ELSE 0 END)     AS idle_samples,
+              MAX(codec)                                      AS codec,
+              MAX(encoder)                                    AS encoder
+         FROM media_samples
+        WHERE user_id = ? AND at >= ? AND identity IS NOT NULL
+        GROUP BY identity
+        ORDER BY cpu_limited DESC, software_samples DESC, frames_dropped DESC
+        LIMIT ?`
+    )
+    .all(userId, since, limit)
+    .map((r) => ({
+      identity: r.identity,
+      roomId: r.room_id,
+      samples: r.samples,
+      lastSeen: r.last_seen,
+      codec: r.codec,
+      encoder: r.encoder,
+      resolution: r.resolution,
+      avgFps: r.avg_fps,
+      avgKbps: r.avg_kbps,
+      framesDropped: r.frames_dropped,
+      packetsLost: r.packets_lost,
+      avgRttMs: r.avg_rtt_ms,
+      // Percentages rather than raw counts, so machines seen for different
+      // lengths of time can be compared directly.
+      softwarePct: pct(r.software_samples, r.samples),
+      cpuLimitedPct: pct(r.cpu_limited, r.samples),
+      bandwidthLimitedPct: pct(r.bw_limited, r.samples),
+      idlePct: pct(r.idle_samples, r.samples),
+    }));
+}
+
+function pct(part, total) {
+  return total ? Math.round((part / total) * 100) : 0;
+}
+
+/** Hourly series for charting. Gaps are real: nobody was sharing. */
+export function analyticsTimeline(userId, { sinceMs, hours = 24 } = {}) {
+  const since = sinceMs ?? Date.now() - hours * 3600_000;
+  return db
+    .prepare(
+      `SELECT strftime('%Y-%m-%dT%H:00', at / 1000, 'unixepoch') AS hour,
+              COUNT(*)                    AS samples,
+              COUNT(DISTINCT peer_id)     AS peers,
+              ROUND(AVG(fps), 1)          AS avg_fps,
+              ROUND(AVG(kbps))            AS avg_kbps,
+              SUM(frames_dropped)         AS frames_dropped,
+              SUM(CASE WHEN limited_by = 'cpu' THEN 1 ELSE 0 END) AS cpu_limited,
+              SUM(CASE WHEN paused = 1 THEN 1 ELSE 0 END)         AS idle
+         FROM media_samples
+        WHERE user_id = ? AND at >= ?
+        GROUP BY hour ORDER BY hour ASC`
+    )
+    .all(userId, since)
+    .map((r) => ({
+      hour: r.hour,
+      samples: r.samples,
+      peers: r.peers,
+      avgFps: r.avg_fps,
+      avgKbps: r.avg_kbps,
+      framesDropped: r.frames_dropped,
+      cpuLimited: r.cpu_limited,
+      idle: r.idle,
+    }));
+}
+
+/** Bandwidth per day, for billing sanity. */
+export function bandwidthDaily(userId, days = 14) {
+  const since = Date.now() - days * 86400_000;
+  return db
+    .prepare(
+      `SELECT date(joined_at / 1000, 'unixepoch') AS day,
+              COALESCE(SUM(bytes_sent), 0)     AS bytes_sent,
+              COALESCE(SUM(bytes_received), 0) AS bytes_received,
+              COUNT(*)                          AS sessions
+         FROM usage_sessions
+        WHERE user_id = ? AND joined_at >= ?
+        GROUP BY day ORDER BY day ASC`
+    )
+    .all(userId, since)
+    .map((r) => ({
+      day: r.day,
+      gbSent: +(r.bytes_sent / 1e9).toFixed(3),
+      gbReceived: +(r.bytes_received / 1e9).toFixed(3),
+      sessions: r.sessions,
+    }));
+}
