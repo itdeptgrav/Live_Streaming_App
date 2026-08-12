@@ -568,6 +568,29 @@ function diagnose({ clients, endpoints, rooms, iframePublishers }) {
     return out;
   }
 
+  // Refuse to pass judgement without evidence. Sessions that predate client
+  // identification, or a frontend that has not picked it up, both look like
+  // "unknown" — and reporting "looks correct" from no data is worse than
+  // reporting nothing, because it stops someone looking.
+  const identified = clients.filter((c) => c.client !== "unknown");
+  const unknownSessions = clients
+    .filter((c) => c.client === "unknown")
+    .reduce((sum, c) => sum + c.sessions, 0);
+
+  if (identified.length === 0) {
+    out.push({
+      level: "info",
+      title: "No client has identified itself yet",
+      detail:
+        `All ${unknownSessions} session(s) in this window predate client reporting, or are running a ` +
+        "cached build. Nothing here can tell an SDK integration from an iframe one until a fresh " +
+        "session connects — reload the sharing page and share again.",
+    });
+    // Everything below reasons about which client was used, so stop here
+    // rather than guess.
+    return out.concat(endpointFindings({ endpoints, rooms }));
+  }
+
   if (iframePublishers > 0) {
     out.push({
       level: "warn",
@@ -592,6 +615,24 @@ function diagnose({ clients, endpoints, rooms, iframePublishers }) {
     }
   }
 
+  const rest = endpointFindings({ endpoints, rooms });
+  const all = out.concat(rest);
+  if (all.every((f) => f.level === "ok" || f.level === "info")) {
+    all.unshift({
+      level: "ok",
+      title: "The integration looks correct",
+      detail: "Clients, endpoints and room modes are all consistent with the documented approach.",
+    });
+  }
+  return all;
+}
+
+/** Checks that hold regardless of which client library was used. */
+function endpointFindings({ endpoints, rooms }) {
+  const out = [];
+  const called = (method, match) =>
+    endpoints.some((e) => e.method === method && e.path.includes(match));
+
   if (!called("POST", "/tokens")) {
     out.push({
       level: "error",
@@ -602,8 +643,24 @@ function diagnose({ clients, endpoints, rooms, iframePublishers }) {
     });
   }
 
-  const meetingRooms = rooms.find((r) => r.mode === "meeting")?.rooms || 0;
-  const screenRooms = rooms.find((r) => r.mode === "screen")?.rooms || 0;
+  const meeting = rooms.find((r) => r.mode === "meeting");
+  const screen = rooms.find((r) => r.mode === "screen");
+  const meetingRooms = meeting?.rooms || 0;
+  const screenRooms = screen?.rooms || 0;
+
+  // Worth surfacing because it is a deliberate policy with a visible cost: the
+  // share is refused outright rather than reported and allowed.
+  if (screenRooms > 0 && screen.strict === screenRooms) {
+    out.push({
+      level: "info",
+      title: "Every screen room refuses anything but a whole display",
+      detail:
+        `All ${screenRooms} screen room(s) set requireEntireScreen: true, so picking a window or a ` +
+        "tab fails with ENTIRE_SCREEN_REQUIRED and no share starts. Pass false to accept any " +
+        "surface and be told which one was chosen, then apply your own rule.",
+    });
+  }
+
   if (meetingRooms > 0 && screenRooms === 0) {
     out.push({
       level: "warn",
@@ -624,13 +681,6 @@ function diagnose({ clients, endpoints, rooms, iframePublishers }) {
     });
   }
 
-  if (out.length === 0) {
-    out.push({
-      level: "ok",
-      title: "The integration looks correct",
-      detail: "Clients, endpoints and room modes are all consistent with the documented approach.",
-    });
-  }
   return out;
 }
 
