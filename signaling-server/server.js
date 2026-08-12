@@ -10,13 +10,14 @@ import {
   createWebRtcTransport,
   removePeer,
 } from "./meetRooms.js";
-import { reconcileOpenSessions, pruneMediaSamples } from "./db.js";
+import { reconcileOpenSessions, pruneMediaSamples, pruneSessionEvents } from "./db.js";
 import { verifyRoomToken } from "./auth.js";
 import {
   openUsageSession,
   closeUsageSession,
   getRoomOwner,
   recordMediaSample,
+  recordSessionEvent,
 } from "./platformStore.js";
 import { handleApiRequest } from "./httpApi.js";
 
@@ -30,7 +31,10 @@ reconcileOpenSessions();
 pruneMediaSamples();
 // Samples arrive continuously, so prune on a slow timer rather than only at
 // boot — a server that stays up for months would otherwise never clean up.
-setInterval(() => pruneMediaSamples(), 6 * 60 * 60 * 1000).unref();
+setInterval(() => {
+  pruneMediaSamples();
+  pruneSessionEvents();
+}, 6 * 60 * 60 * 1000).unref();
  
 // ---- office-monitor rooms (unchanged mesh mode) ----
 // roomId -> { broadcaster: ws|null, viewers: Map<viewerId, ws> }
@@ -168,6 +172,18 @@ wss.on("connection", (ws, req) => {
       const bytes = leaving ? await measureTransportBytes(leaving) : {};
       closeUsageSession(ws.meta.usageId, bytes);
       ws.meta.usageId = null;
+      if (room?.ownerUserId && leaving) {
+        try {
+          recordSessionEvent({
+            userId: room.ownerUserId,
+            roomId: room.id,
+            peerId: ws.meta.peerId,
+            identity: leaving.identity,
+            type: "peer-dropped",
+            detail: "socket closed",
+          });
+        } catch {}
+      }
       if (room && ws.meta.peerId) {
         removePeer(room, ws.meta.peerId);
         for (const peer of room.peers.values()) {
@@ -518,6 +534,28 @@ async function handleMeetMessage(ws, msg) {
         });
       } catch (err) {
         console.error("[stats] could not record sample:", err.message);
+      }
+      break;
+    }
+
+    // Notable things the client saw. Quality samples describe how well a
+    // session was going; only the client can say that a share was refused or a
+    // picture froze, and those are what people actually report.
+    case "meet-event": {
+      const { room, peer } = currentMeetPeer(ws);
+      if (!room?.ownerUserId || !peer) return;
+      try {
+        recordSessionEvent({
+          userId: room.ownerUserId,
+          roomId: room.id,
+          peerId: ws.meta.peerId,
+          identity: peer.identity,
+          type: msg.event,
+          code: msg.code,
+          detail: msg.detail,
+        });
+      } catch (err) {
+        console.error("[event] could not record:", err.message);
       }
       break;
     }

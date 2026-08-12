@@ -29,6 +29,8 @@ import {
   bandwidthDaily,
   integrationReport,
   recordApiCall,
+  recentEvents,
+  eventSummary,
 } from "./platformStore.js";
 import {
   generateRoomId,
@@ -395,6 +397,7 @@ export async function handleApiRequest(req, res, { publicUrl }) {
         days,
         ...analyticsSummary(user.id, { sinceMs }),
         peers: withLiveFlag(peerBreakdown(user.id, { sinceMs }), user.id),
+        eventSummary: eventSummary(user.id, { sinceMs }),
       }),
       true
     );
@@ -428,6 +431,8 @@ export async function handleApiRequest(req, res, { publicUrl }) {
         peers: withLiveFlag(peerBreakdown(user.id, { sinceMs }), user.id),
         timeline: analyticsTimeline(user.id, { sinceMs }),
         bandwidthDaily: bandwidthDaily(user.id, days),
+        events: recentEvents(user.id, { sinceMs, limit: 200 }),
+        eventSummary: eventSummary(user.id, { sinceMs }),
       }),
       true
     );

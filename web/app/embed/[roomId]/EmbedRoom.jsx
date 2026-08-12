@@ -54,6 +54,7 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
     unpublish,
     reportMediaState,
     reportStats,
+    reportEvent,
     requestKeyFrame,
     disconnect,
   } = room;
@@ -224,15 +225,21 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
       track.onended = () => stopScreenShare();
     } catch (err) {
       if (err.code === "CANCELLED") {
+        reportEvent("share-cancelled");
         emit("screen-share-cancelled", {});
       } else {
+        reportEvent(
+          err.code === "ENTIRE_SCREEN_REQUIRED" ? "share-refused" : "share-failed",
+          err.code,
+          err.message
+        );
         setError(err.message);
         emit("error", { message: err.message, code: err.code, capture: err.capture });
       }
     } finally {
       setBusy(false);
     }
-  }, [requireEntireScreen, publish, emit, setError, stopScreenShare, ui.capture]);
+  }, [requireEntireScreen, publish, emit, setError, stopScreenShare, ui.capture, reportEvent]);
 
   // ---------------- camera / mic (meeting rooms) ----------------
 

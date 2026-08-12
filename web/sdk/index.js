@@ -133,6 +133,11 @@ class Session {
     };
   }
 
+  /** Tells the platform something happened, so failures are visible to us. */
+  report(event, code, detail) {
+    this._send({ type: "meet-event", event, code, detail });
+  }
+
   _applyDemand(watchers) {
     this.watchers = watchers;
     const producer = this._wire?.producer;
@@ -196,6 +201,7 @@ class Session {
       }
       this._send({ type: "meet-leave" });
     } catch {}
+    this.report("share-stopped");
     this._dropWire();
     this._releaseCapture();
     this._emit("ended", {});
@@ -362,6 +368,7 @@ async function handleDrop(session) {
   for (let attempt = 0; attempt < RETRY_DELAYS_MS.length; attempt++) {
     if (!session.active || session._stopping) return;
 
+    session.report("reconnecting", null, `attempt ${attempt + 1}`);
     session._emit("reconnecting", {
       attempt: attempt + 1,
       of: RETRY_DELAYS_MS.length,
@@ -384,6 +391,7 @@ async function handleDrop(session) {
         session,
       });
       adoptWire(session, wire);
+      session.report("resumed", null, `after ${attempt + 1} attempt(s)`);
       session._emit("resumed", { attempts: attempt + 1 });
       return;
     } catch {
@@ -511,6 +519,7 @@ export async function share(opts = {}) {
   }
 
   adoptWire(session, wire);
+  session.report("share-started", capture.displaySurface, `${capture.width}x${capture.height}`);
 
   // The browser's own "Stop sharing" bar ends the track without telling us,
   // and that ending is final — there is no capture left to reconnect around.

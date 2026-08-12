@@ -978,6 +978,8 @@ export default function AnalyticsPage() {
   const codecs = data?.codecs || [];
   const timeline = data?.timeline || [];
   const bandwidthDaily = data?.bandwidthDaily || [];
+  const events = data?.events || [];
+  const eventSummary = data?.eventSummary || [];
   const samples = num(quality.samples);
   const hasTelemetry = samples > 0;
 
@@ -1347,6 +1349,85 @@ export default function AnalyticsPage() {
           )}
 
           {/* 8. per-machine ----------------------------------------------- */}
+          {(hasTelemetry || eventSummary.length > 0) && (
+            <Card>
+              <SectionHead
+                id="events-heading"
+                title="What actually happened"
+                hint="Failures and recoveries as the browsers reported them. Quality numbers say how well a session went; these say what went wrong with it."
+              />
+              {eventSummary.length === 0 ? (
+                <ChartEmpty>
+                  Nothing reported in this window — no refused shares, dropped
+                  connections or stalled pictures.
+                </ChartEmpty>
+              ) : (
+                <>
+                  <div className="flex flex-wrap gap-2">
+                    {eventSummary.map((e) => (
+                      <span
+                        key={`${e.type}-${e.code || ""}`}
+                        className={`inline-flex items-center gap-2 rounded-full px-3 py-1 text-xs ring-1 ${
+                          e.level === "error"
+                            ? "bg-[#d03b3b]/10 text-[#b83232] ring-[#d03b3b]/25 dark:text-[#f08a8a]"
+                            : e.level === "warn"
+                              ? "bg-amber-500/10 text-amber-700 ring-amber-600/25 dark:text-amber-300"
+                              : "bg-zinc-500/10 text-zinc-600 ring-zinc-500/20 dark:text-zinc-300"
+                        }`}
+                      >
+                        <span className="font-medium">{e.type}</span>
+                        {e.code ? <code className="font-mono text-[11px]">{e.code}</code> : null}
+                        <span className="tabular-nums">{e.count}</span>
+                        <span className="opacity-60">
+                          · {e.machines} machine{e.machines === 1 ? "" : "s"}
+                        </span>
+                      </span>
+                    ))}
+                  </div>
+
+                  <div className={`mt-4 max-h-80 overflow-y-auto rounded-xl ${RING}`}>
+                    <table className="w-full min-w-[40rem] border-collapse text-left">
+                      <caption className="sr-only">Recent session events, newest first</caption>
+                      <thead className="sticky top-0 bg-white dark:bg-zinc-950">
+                        <tr className="border-b border-zinc-950/10 dark:border-white/10">
+                          <th scope="col" className={TH}>When</th>
+                          <th scope="col" className={TH}>Event</th>
+                          <th scope="col" className={TH}>Machine</th>
+                          <th scope="col" className={TH}>Detail</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {events.map((e, i) => (
+                          <tr
+                            key={`${e.at}-${i}`}
+                            className={`border-b border-zinc-950/5 last:border-0 dark:border-white/5 ${
+                              e.level === "error" ? "bg-[#d03b3b]/[0.06]" : ""
+                            }`}
+                          >
+                            <td className={`${TD} whitespace-nowrap tabular-nums`}>
+                              {formatDate(e.at)}
+                            </td>
+                            <th scope="row" className={`${TD} font-medium`}>
+                              {e.type}
+                              {e.code ? (
+                                <code className="ml-2 font-mono text-[11px] opacity-70">{e.code}</code>
+                              ) : null}
+                            </th>
+                            <td className={TD}>{e.identity || "—"}</td>
+                            <td className={`${TD} text-zinc-500 dark:text-zinc-400`}>
+                              {e.detail || "—"}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </>
+              )}
+            </Card>
+          )}
+
+          {/* 9. per machine ------------------------------------------------ */}
           {hasTelemetry && (
             <Card>
               <SectionHead

@@ -439,6 +439,12 @@ export function useRoomConnection({ roomId, token, onEvent }) {
 
   const reportStats = useCallback((stats) => send({ type: "meet-stats", ...stats }), [send]);
 
+  /** Records a notable moment so failures show up in analytics, not just chat. */
+  const reportEvent = useCallback(
+    (event, code, detail) => send({ type: "meet-event", event, code, detail }),
+    [send]
+  );
+
   const requestKeyFrame = useCallback((consumerId) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify({ type: "meet-request-keyframe", consumerId }));
@@ -486,6 +492,7 @@ export function useRoomConnection({ roomId, token, onEvent }) {
 
     for (let attempt = 0; attempt < RECONNECT_DELAYS_MS.length; attempt++) {
       if (intentionalCloseRef.current) break;
+      send({ type: "meet-event", event: "reconnecting", detail: `attempt ${attempt + 1}` });
       emit.current?.("reconnecting", {
         attempt: attempt + 1,
         of: RECONNECT_DELAYS_MS.length,
@@ -496,6 +503,7 @@ export function useRoomConnection({ roomId, token, onEvent }) {
       try {
         await connect(connectOptsRef.current || { needsSendTransport: false });
         reconnectingRef.current = false;
+        send({ type: "meet-event", event: "resumed", detail: `after ${attempt + 1} attempt(s)` });
         emit.current?.("resumed", { attempts: attempt + 1 });
         return;
       } catch {
@@ -510,7 +518,7 @@ export function useRoomConnection({ roomId, token, onEvent }) {
       code: "DISCONNECTED",
       message: "The connection was lost and could not be restored.",
     });
-  }, [connect, syncTracks, syncPeers, setError]);
+  }, [connect, syncTracks, syncPeers, setError, send]);
 
   useEffect(() => {
     reconnectRef.current = reconnect;
@@ -562,6 +570,7 @@ export function useRoomConnection({ roomId, token, onEvent }) {
     unpublish,
     reportMediaState,
     reportStats,
+    reportEvent,
     requestKeyFrame,
     disconnect,
   };

@@ -168,6 +168,32 @@ CREATE TABLE IF NOT EXISTS api_calls (
 );
 `);
 
+// Notable things that happened, as opposed to how well they were going.
+// Quality samples say a session was healthy; they cannot say a share was
+// refused, a connection dropped and recovered, or a picture froze. Those are
+// the events people actually report, so they are recorded as events.
+db.exec(`
+CREATE TABLE IF NOT EXISTS session_events (
+  id       TEXT PRIMARY KEY,
+  user_id  TEXT NOT NULL,
+  room_id  TEXT,
+  peer_id  TEXT,
+  identity TEXT,
+  at       INTEGER NOT NULL,
+  level    TEXT NOT NULL,
+  type     TEXT NOT NULL,
+  code     TEXT,
+  detail   TEXT
+);
+CREATE INDEX IF NOT EXISTS idx_events_user_time ON session_events(user_id, at);
+`);
+
+export function pruneSessionEvents(days = 14) {
+  const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
+  const r = db.prepare("DELETE FROM session_events WHERE at < ?").run(cutoff);
+  if (r.changes > 0) console.log(`[db] pruned ${r.changes} session event(s)`);
+}
+
 // A hard restart leaves peer rows with left_at NULL and nobody to close them.
 // Closing them at boot means "still connected" only ever describes live peers.
 export function reconcileOpenSessions() {

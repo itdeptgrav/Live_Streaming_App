@@ -719,3 +719,82 @@ function describeBrowser(ua = "") {
     : "Unknown OS";
   return `${browser}${version ? " " + version : ""} · ${os}`;
 }
+
+
+// ---------------- session events ----------------
+
+const EVENT_LEVEL = {
+  "share-failed": "error",
+  "disconnected": "error",
+  "publish-failed": "error",
+  "reconnect-failed": "error",
+  "video-stalled": "warn",
+  "reconnecting": "warn",
+  "share-refused": "warn",
+  "share-cancelled": "info",
+  "resumed": "info",
+  "share-started": "info",
+  "share-stopped": "info",
+};
+
+export function recordSessionEvent({ userId, roomId, peerId, identity, type, code, detail }) {
+  if (!userId || !type) return;
+  db.prepare(
+    `INSERT INTO session_events (id, user_id, room_id, peer_id, identity, at, level, type, code, detail)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+  ).run(
+    newId("evt"),
+    userId,
+    roomId || null,
+    peerId || null,
+    identity || null,
+    Date.now(),
+    EVENT_LEVEL[type] || "info",
+    String(type).slice(0, 40),
+    code ? String(code).slice(0, 40) : null,
+    detail ? String(detail).slice(0, 300) : null
+  );
+}
+
+/** Most recent events, newest first — the "what actually happened" log. */
+export function recentEvents(userId, { sinceMs, limit = 200 } = {}) {
+  const since = sinceMs ?? Date.now() - 7 * 24 * 60 * 60 * 1000;
+  return db
+    .prepare(
+      `SELECT at, level, type, code, detail, identity, room_id
+         FROM session_events WHERE user_id = ? AND at >= ?
+        ORDER BY at DESC LIMIT ?`
+    )
+    .all(userId, since, limit)
+    .map((r) => ({
+      at: r.at,
+      level: r.level,
+      type: r.type,
+      code: r.code,
+      detail: r.detail,
+      identity: r.identity,
+      roomId: r.room_id,
+    }));
+}
+
+/** Counts by type, so a recurring failure stands out from a one-off. */
+export function eventSummary(userId, { sinceMs } = {}) {
+  const since = sinceMs ?? Date.now() - 7 * 24 * 60 * 60 * 1000;
+  return db
+    .prepare(
+      `SELECT type, level, COALESCE(code, '') AS code, COUNT(*) AS count,
+              COUNT(DISTINCT identity) AS machines, MAX(at) AS last_at
+         FROM session_events WHERE user_id = ? AND at >= ?
+        GROUP BY type, level, code
+        ORDER BY (level = 'error') DESC, count DESC`
+    )
+    .all(userId, since)
+    .map((r) => ({
+      type: r.type,
+      level: r.level,
+      code: r.code || null,
+      count: r.count,
+      machines: r.machines,
+      lastAt: r.last_at,
+    }));
+}
