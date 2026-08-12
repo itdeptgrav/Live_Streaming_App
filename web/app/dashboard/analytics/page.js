@@ -961,6 +961,17 @@ export default function AnalyticsPage() {
 
   const refresh = useCallback(() => setNonce((v) => v + 1), []);
 
+  // Poll while the tab is visible, so the Status column reflects who is
+  // actually sharing rather than whoever was sharing when the page was opened.
+  // Paused in a background tab: nobody is reading it, and a monitoring
+  // dashboard left open all day should not keep the server busy for nothing.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState === "visible") refresh();
+    }, 15000);
+    return () => clearInterval(timer);
+  }, [refresh]);
+
   const quality = data?.quality || {};
   const bandwidth = data?.bandwidth || {};
   const peers = data?.peers || [];
@@ -1341,18 +1352,21 @@ export default function AnalyticsPage() {
               <SectionHead
                 id="machines-heading"
                 title="Per machine"
-                hint="Worst first: most CPU-limited, then most software-encoded. Tinted rows are the ones worth investigating."
+                hint="Sharing right now first, then the worst offenders. Tinted rows are the ones worth investigating; the figures cover the whole period, not just this moment."
               />
               {peers.length === 0 ? (
                 <ChartEmpty>No named machines reported in this window.</ChartEmpty>
               ) : (
                 <div className="-mx-4 overflow-x-auto px-4 sm:-mx-5 sm:px-5">
-                  <table className="w-full min-w-[64rem] border-collapse text-left">
+                  <table className="w-full min-w-[70rem] border-collapse text-left">
                     <caption className="sr-only">
                       Per-machine encoding and quality breakdown, worst first
                     </caption>
                     <thead>
                       <tr className="border-b border-zinc-950/10 dark:border-white/10">
+                        <th scope="col" className={TH}>
+                          Status
+                        </th>
                         <th scope="col" className={TH}>
                           Machine
                         </th>
@@ -1401,6 +1415,9 @@ export default function AnalyticsPage() {
                               problem ? "bg-[#d03b3b]/[0.06]" : ""
                             }`}
                           >
+                            <td className={TD}>
+                              <LivePill live={p.live} />
+                            </td>
                             <th scope="row" className={`${TD} font-medium`}>
                               {p.identity}
                             </th>
@@ -1449,5 +1466,30 @@ export default function AnalyticsPage() {
         </div>
       )}
     </main>
+  );
+}
+
+/**
+ * Whether this machine is connected at this moment, taken from live room state
+ * rather than the age of its last sample — telemetry is 30 seconds apart, so a
+ * timestamp would call a perfectly healthy machine offline between reports.
+ */
+function LivePill({ live }) {
+  if (live) {
+    return (
+      <span className="inline-flex items-center gap-1.5 rounded-full bg-emerald-500/10 px-2 py-0.5 text-xs font-medium text-emerald-700 ring-1 ring-emerald-600/25 dark:text-emerald-400 dark:ring-emerald-400/25">
+        <span className="relative flex h-1.5 w-1.5">
+          <span className="absolute inline-flex h-full w-full animate-ping rounded-full bg-emerald-500 opacity-60" />
+          <span className="relative inline-flex h-1.5 w-1.5 rounded-full bg-emerald-500" />
+        </span>
+        Sharing
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1.5 rounded-full px-2 py-0.5 text-xs text-zinc-500 ring-1 ring-zinc-950/10 dark:text-zinc-400 dark:ring-white/10">
+      <span className="h-1.5 w-1.5 rounded-full bg-zinc-400 dark:bg-zinc-600" />
+      Offline
+    </span>
   );
 }

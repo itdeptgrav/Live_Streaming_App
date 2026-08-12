@@ -128,6 +128,32 @@ function describePeer([peerId, peer]) {
 }
 
 /**
+ * Identities connected right now, from live room state rather than from the
+ * age of the last sample. Telemetry is 30 seconds apart, so timestamps alone
+ * would call a machine offline between two perfectly healthy reports.
+ */
+function withLiveFlag(peers, userId) {
+  const live = liveIdentities(userId);
+  // Connected machines first, then the worst offenders — someone sharing right
+  // now is more actionable than someone who had trouble yesterday.
+  return peers
+    .map((p) => ({ ...p, live: live.has(p.identity) }))
+    .sort((a, b) => Number(b.live) - Number(a.live));
+}
+
+function liveIdentities(userId) {
+  const live = new Set();
+  for (const room of listRoomsForUser(userId)) {
+    const meetRoom = getMeetRoom(room.roomId);
+    if (!meetRoom) continue;
+    for (const peer of meetRoom.peers.values()) {
+      if (peer.identity) live.add(peer.identity);
+    }
+  }
+  return live;
+}
+
+/**
  * Handles a request if it matches a known route.
  * Returns true when handled, false to let the caller 404.
  */
@@ -345,7 +371,7 @@ export async function handleApiRequest(req, res, { publicUrl }) {
       json(res, 200, {
         days,
         ...analyticsSummary(user.id, { sinceMs }),
-        peers: peerBreakdown(user.id, { sinceMs }),
+        peers: withLiveFlag(peerBreakdown(user.id, { sinceMs }), user.id),
       }),
       true
     );
@@ -360,7 +386,7 @@ export async function handleApiRequest(req, res, { publicUrl }) {
       json(res, 200, {
         days,
         ...analyticsSummary(user.id, { sinceMs }),
-        peers: peerBreakdown(user.id, { sinceMs }),
+        peers: withLiveFlag(peerBreakdown(user.id, { sinceMs }), user.id),
         timeline: analyticsTimeline(user.id, { sinceMs }),
         bandwidthDaily: bandwidthDaily(user.id, days),
       }),
