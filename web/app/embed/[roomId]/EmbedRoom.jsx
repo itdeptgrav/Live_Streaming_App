@@ -14,6 +14,7 @@ import { readRoomTokenClaims, surfaceLabel } from "@/lib/roomToken";
 import { resolveEmbedUi } from "@/lib/embedOptions";
 import { captureScreen } from "@/lib/screenCapture";
 import {
+  resolveScreenSettings,
   screenEncodings,
   SCREEN_CODEC_OPTIONS,
   preferSharpness,
@@ -182,7 +183,8 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
     setError(null);
     setBusy(true);
     try {
-      const { stream, track, capture } = await captureScreen({ requireEntireScreen });
+      const settings = resolveScreenSettings(ui.capture);
+      const { stream, track, capture } = await captureScreen({ requireEntireScreen, settings });
       screenStreamRef.current = stream;
 
       try {
@@ -192,7 +194,7 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
           displaySurface: capture.displaySurface,
           width: capture.width,
           height: capture.height,
-          encodings: screenEncodings(),
+          encodings: screenEncodings(settings.maxBitrate),
           codecOptions: SCREEN_CODEC_OPTIONS,
         });
       } catch (err) {
@@ -205,7 +207,7 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
       // through degradationPreference, instead of pinning the resolution,
       // leaves it a way to fall back further if it still cannot keep up —
       // without that escape route frames queue in memory instead.
-      await preferSharpness(screenProducerRef.current);
+      await preferSharpness(screenProducerRef.current, settings.contentHint);
       const codec = negotiatedCodec(screenProducerRef.current);
 
       setSharing({ capture: { ...capture, codec } });
@@ -230,7 +232,7 @@ export default function EmbedRoom({ roomId, token, parentOrigin = "*", options }
     } finally {
       setBusy(false);
     }
-  }, [requireEntireScreen, publish, emit, setError, stopScreenShare]);
+  }, [requireEntireScreen, publish, emit, setError, stopScreenShare, ui.capture]);
 
   // ---------------- camera / mic (meeting rooms) ----------------
 

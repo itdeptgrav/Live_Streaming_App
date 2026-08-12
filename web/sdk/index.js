@@ -13,7 +13,8 @@
 //
 import { Device } from "mediasoup-client";
 import {
-  SCREEN_VIDEO_CONSTRAINTS,
+  screenVideoConstraints,
+  resolveScreenSettings,
   screenEncodings,
   SCREEN_CODEC_OPTIONS,
   preferSharpness,
@@ -163,15 +164,24 @@ class Session {
  * @param {string} [opts.serverUrl]  wss:// URL. Defaults to the `url` your
  *                                   backend received alongside the token.
  * @param {boolean}[opts.requireEntireScreen] Refuse window/tab locally too.
- * @param {number} [opts.maxBitrate]
+ * @param {number} [opts.maxBitrate]  Default 5 Mbps.
+ * @param {number} [opts.fps]         Default 30. Capture produces frames only
+ *                                    when the screen changes, so a static
+ *                                    desktop still averages far less.
+ * @param {number} [opts.maxWidth]    Default 1920.
+ * @param {number} [opts.maxHeight]   Default 1200.
+ * @param {string} [opts.contentHint] "detail" (default, sharp text) or
+ *                                    "motion" (smoother, more likely to use a
+ *                                    hardware encoder).
  * @returns {Promise<Session>}
  */
 export async function share({
   token,
   serverUrl,
   requireEntireScreen = false,
-  maxBitrate = 3_000_000,
+  ...tuning
 } = {}) {
+  const settings = resolveScreenSettings(tuning);
   if (!token) throw new GravStreamError("TOKEN_REQUIRED", "A room token is required.");
 
   const claims = readClaims(token);
@@ -201,7 +211,7 @@ export async function share({
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
-      video: SCREEN_VIDEO_CONSTRAINTS,
+      video: screenVideoConstraints(settings),
       audio: false,
       monitorTypeSurfaces: "include",
       selfBrowserSurface: "exclude",
@@ -237,8 +247,9 @@ export async function share({
     );
   }
 
-  // Tells the encoder this is text and UI, not motion video.
-  if ("contentHint" in track) track.contentHint = "detail";
+  // Tells the encoder what kind of content this is, which decides whether it
+  // protects sharpness or smoothness when it has to choose.
+  if ("contentHint" in track) track.contentHint = settings.contentHint;
 
   // ---- connect and publish ----
   let ws;
@@ -363,7 +374,7 @@ export async function share({
 
     const producer = await sendTransport.produce({
       track,
-      encodings: screenEncodings(maxBitrate),
+      encodings: screenEncodings(settings.maxBitrate),
       codecOptions: SCREEN_CODEC_OPTIONS,
       appData: {
         source: "screen",
@@ -377,7 +388,7 @@ export async function share({
     // degradationPreference rather than by pinning the resolution, so the
     // encoder keeps a way to fall back further — without one, frames queue in
     // memory and both latency and memory climb without bound.
-    await preferSharpness(producer);
+    await preferSharpness(producer, settings.contentHint);
     capture.codec = negotiatedCodec(producer);
 
     const session = new Session({

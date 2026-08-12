@@ -1,4 +1,4 @@
-import { SCREEN_VIDEO_CONSTRAINTS } from "./screenTuning";
+import { screenVideoConstraints, resolveScreenSettings } from "./screenTuning";
 
 // Screen capture with surface reporting and policy enforcement.
 //
@@ -39,7 +39,8 @@ export class ScreenCaptureError extends Error {
  *   SURFACE_UNKNOWN         - policy applies but the browser won't report the surface
  *   NO_VIDEO_TRACK          - capture produced nothing usable
  */
-export async function captureScreen({ requireEntireScreen = false } = {}) {
+export async function captureScreen({ requireEntireScreen = false, settings } = {}) {
+  const tuning = resolveScreenSettings(settings || {});
   // The picker is opened by THIS frame, so this frame has to be on screen when
   // it happens. A hidden or zero-sized iframe gets no picker and, in some
   // browsers, no error either — it simply never resolves. Fail loudly instead,
@@ -63,7 +64,7 @@ export async function captureScreen({ requireEntireScreen = false } = {}) {
   let stream;
   try {
     stream = await navigator.mediaDevices.getDisplayMedia({
-      video: SCREEN_VIDEO_CONSTRAINTS,
+      video: screenVideoConstraints(tuning),
       audio: false,
       // Keep the picker focused on real screens and stop the capture preview
       // from being offered as a capture target (the infinite-mirror problem).
@@ -115,7 +116,7 @@ export async function captureScreen({ requireEntireScreen = false } = {}) {
 
   // Tells the encoder this is text and UI rather than motion video: keeps text
   // legible and stops aggressive downscaling of a mostly-static screen.
-  if ("contentHint" in track) track.contentHint = "detail";
+  if ("contentHint" in track) track.contentHint = tuning.contentHint;
 
   return { stream, track, capture };
 }

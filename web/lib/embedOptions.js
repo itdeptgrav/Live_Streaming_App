@@ -48,6 +48,16 @@ export function readEmbedOptions(query = {}) {
       : "dark",
     accent: sanitizeColor(query.accent) || "#34d399",
     startLabel: typeof query.startLabel === "string" ? query.startLabel.slice(0, 40) : null,
+    // Capture tuning, passed straight through and clamped by screenTuning.
+    // Exposed so a host can trade sharpness for smoothness, or dial a fleet of
+    // older machines down, without waiting on a release from us.
+    capture: {
+      fps: query.fps,
+      maxWidth: query.maxWidth,
+      maxHeight: query.maxHeight,
+      maxBitrate: query.maxBitrate,
+      contentHint: query.contentHint,
+    },
   };
 }
 
@@ -80,6 +90,7 @@ export function resolveEmbedUi(options, { mode, isViewer } = {}) {
     theme: options?.theme || "dark",
     accent: options?.accent || "#34d399",
     startLabel: options?.startLabel || null,
+    capture: options?.capture || {},
   };
 }
 

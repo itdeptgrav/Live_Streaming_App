@@ -12,21 +12,63 @@
 // what degradationPreference expresses — but "cannot downscale AND cannot keep
 // up" must never be reachable.
 
-/** Capture constraints for a desktop. */
-export const SCREEN_VIDEO_CONSTRAINTS = {
-  // A hint only; the picker still lets the user choose a window or a tab.
-  displaySurface: "monitor",
-  // Capping the long edge keeps a 1440p or 4K desktop from being encoded at
-  // full size into the same bitrate, which is what made small text mush. 1200
-  // rather than 1080 because 16:10 laptop panels are common and an exact-fit
-  // cap avoids a rescale step that costs CPU for no visible gain.
-  width: { max: 1920 },
-  height: { max: 1200 },
-  // A desktop is mostly static. Ten frames a second is ample for reading
-  // someone type, and it roughly halves the encoder's work compared with 15 —
-  // the single cheapest way to stop the pipeline falling behind.
-  frameRate: { ideal: 10, max: 15 },
+/**
+ * Defaults, all overridable per session.
+ *
+ * A hard frame-rate cap is the worst of both worlds: it makes scrolling and
+ * video choppy even on a machine with capacity to spare, and it does nothing
+ * for a machine that is genuinely struggling. Ask for 30 and let
+ * degradationPreference drop it when the encoder cannot keep up — fast when
+ * there is room, graceful when there is not.
+ *
+ * Note that a screen capture produces frames only when something changes, so a
+ * mostly-static desktop legitimately averages a handful of frames per second.
+ * That is not the encoder failing; it is nothing having happened.
+ */
+export const SCREEN_DEFAULTS = {
+  maxWidth: 1920,
+  // 1200 rather than 1080: 16:10 laptop panels are common, and an exact-fit cap
+  // avoids a rescale step that costs CPU for no visible gain.
+  maxHeight: 1200,
+  fps: 30,
+  maxBitrate: 5_000_000,
+  // "detail" keeps text sharp under pressure. "motion" trades some sharpness
+  // for smoothness and is more likely to engage a hardware encoder, since
+  // hardware paths are tuned for camera video.
+  contentHint: "detail",
 };
+
+const clamp = (value, lo, hi, fallback) => {
+  const n = Number(value);
+  return Number.isFinite(n) ? Math.min(Math.max(n, lo), hi) : fallback;
+};
+
+/** Normalises caller-supplied overrides against sane bounds. */
+export function resolveScreenSettings(options = {}) {
+  return {
+    maxWidth: clamp(options.maxWidth, 640, 3840, SCREEN_DEFAULTS.maxWidth),
+    maxHeight: clamp(options.maxHeight, 480, 2160, SCREEN_DEFAULTS.maxHeight),
+    fps: clamp(options.fps, 1, 60, SCREEN_DEFAULTS.fps),
+    maxBitrate: clamp(options.maxBitrate, 250_000, 20_000_000, SCREEN_DEFAULTS.maxBitrate),
+    contentHint: ["detail", "motion", "text"].includes(options.contentHint)
+      ? options.contentHint
+      : SCREEN_DEFAULTS.contentHint,
+  };
+}
+
+/** Capture constraints for a desktop. */
+export function screenVideoConstraints(options = {}) {
+  const s = resolveScreenSettings(options);
+  return {
+    // A hint only; the picker still lets the user choose a window or a tab.
+    displaySurface: "monitor",
+    width: { max: s.maxWidth },
+    height: { max: s.maxHeight },
+    // ideal rather than exact: the browser is free to deliver fewer frames
+    // when nothing is moving, which is most of the time on a desktop.
+    frameRate: { ideal: s.fps, max: s.fps },
+  };
+}
 
 /**
  * Encoding parameters.
@@ -35,11 +77,14 @@ export const SCREEN_VIDEO_CONSTRAINTS = {
  * encoder's last escape valve, and a pipeline that cannot shed load buffers
  * instead — which is far worse for the viewer than a brief dip in sharpness.
  */
-export function screenEncodings(maxBitrate = 3_000_000) {
+export function screenEncodings(maxBitrate = SCREEN_DEFAULTS.maxBitrate) {
   return [{ maxBitrate }];
 }
 
-export const SCREEN_CODEC_OPTIONS = { videoGoogleStartBitrate: 1500 };
+export const SCREEN_CODEC_OPTIONS = { videoGoogleStartBitrate: 2500 };
+
+/** Back-compat for callers that imported the constant form. */
+export const SCREEN_VIDEO_CONSTRAINTS = screenVideoConstraints();
 
 /**
  * Asks the sender to trade frame rate for resolution when it is under
@@ -50,12 +95,16 @@ export const SCREEN_CODEC_OPTIONS = { videoGoogleStartBitrate: 1500 };
  * Best-effort — not every browser exposes it, and a failure here is not worth
  * failing a working share over.
  */
-export async function preferSharpness(producer) {
+export async function preferSharpness(producer, contentHint = "detail") {
   const sender = producer?.rtpSender;
   if (!sender || typeof sender.getParameters !== "function") return null;
   try {
     const params = sender.getParameters();
-    params.degradationPreference = "maintain-resolution";
+    // Text wants resolution held and frame rate sacrificed; motion wants the
+    // opposite. Either way the encoder keeps a way to shed load, which is what
+    // stops frames queueing into memory.
+    params.degradationPreference =
+      contentHint === "motion" ? "maintain-framerate" : "maintain-resolution";
     await sender.setParameters(params);
     return true;
   } catch {
