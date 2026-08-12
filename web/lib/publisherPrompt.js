@@ -167,6 +167,28 @@ reason to:
   machine almost nothing for the rest of it. session.watchers and the
   "watchers" event tell you whether anyone is currently looking.
 
+## The session survives a dropped connection
+
+A screen capture cannot be recreated without another user gesture, so the SDK
+never throws one away because the network blinked. If the socket drops it
+reconnects around the same capture, with backoff, and only gives up after
+about forty seconds.
+
+Handle these so your interface tells the truth:
+
+    session.on("reconnecting", (e) => showBanner("Reconnecting " + e.attempt + " of " + e.of));
+    session.on("resumed",      () => hideBanner());
+    session.on("ended",        (e) => {
+      // e.reason === "disconnected" -> the connection could not be recovered
+      // e.reason undefined          -> stop() was called, or the user pressed
+      //                                the browser's own "Stop sharing" bar
+      setOffline(e.reason);
+    });
+
+session.connected tells you the current state at any moment. Do not tear down
+your own UI on "reconnecting" — the share is still alive and the user is still
+sharing; only "ended" is final.
+
 ## Diagnosing a slow session
 
 Do not report "it is slow" — call session.getStats() on the SHARING machine
