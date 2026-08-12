@@ -38,15 +38,38 @@ export const routerMediaCodecs = [
     clockRate: 48000,
     channels: 2,
   },
+  // Level matters as much as profile. A hardware encoder refuses any frame
+  // larger than the negotiated level allows, and the browser then falls back to
+  // its software encoder without saying so — which is exactly what happened
+  // with 42e01f: level 3.1 caps at 1280x720, so every 1080p screen share was
+  // silently encoded on the CPU by OpenH264.
+  //
+  // 5.2 is well above anything a desktop capture will produce, and
+  // level-asymmetry-allowed lets each side settle lower if it needs to.
   {
     kind: "video",
     mimeType: "video/H264",
     clockRate: 90000,
     parameters: {
       "packetization-mode": 1,
-      // Constrained Baseline 3.1 — the profile hardware encoders universally
-      // support.
-      "profile-level-id": "42e01f",
+      // Constrained Baseline 5.2 — the profile hardware encoders universally
+      // support, at a level that actually covers a full-size desktop.
+      "profile-level-id": "42e034",
+      "level-asymmetry-allowed": 1,
+      "x-google-start-bitrate": 1500,
+    },
+    rtcpFeedback: VIDEO_FEEDBACK,
+  },
+  {
+    // Main profile compresses text noticeably better than Baseline thanks to
+    // CABAC, and most hardware encoders offer it. Listed second so a machine
+    // that only does Baseline still matches.
+    kind: "video",
+    mimeType: "video/H264",
+    clockRate: 90000,
+    parameters: {
+      "packetization-mode": 1,
+      "profile-level-id": "4d0034",
       "level-asymmetry-allowed": 1,
       "x-google-start-bitrate": 1500,
     },
